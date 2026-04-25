@@ -58,7 +58,7 @@ separate disk quota or retention strategy.
 One-line installer:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | { [ "$(id -u)" -eq 0 ] && bash || sudo bash; }
 ```
 
 The installer checks for Debian/Ubuntu, installs required packages, creates the
@@ -66,10 +66,16 @@ dedicated `portal-proxy` user, installs or updates the release binary, adds
 optional SSH hardening for that user, enables a daily prune timer, and runs
 `portal-proxy doctor`.
 
+If you are already in a root shell, this is equivalent to:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | bash
+```
+
 Install a specific release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | sudo PORTAL_PROXY_VERSION=v0.5.0-beta.1 bash
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | { [ "$(id -u)" -eq 0 ] && PORTAL_PROXY_VERSION=v0.5.0-beta.1 bash || sudo PORTAL_PROXY_VERSION=v0.5.0-beta.1 bash; }
 ```
 
 The default installer uses GitHub's `latest` release URL. For beta prereleases,

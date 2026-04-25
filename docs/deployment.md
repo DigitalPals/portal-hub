@@ -21,13 +21,13 @@ for reconnect replay and thumbnails.
 Use the installer for a standard Debian/Ubuntu LXC:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | { [ "$(id -u)" -eq 0 ] && bash || sudo bash; }
 ```
 
 For beta prereleases, pin the version:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | sudo PORTAL_PROXY_VERSION=v0.5.0-beta.1 bash
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | { [ "$(id -u)" -eq 0 ] && PORTAL_PROXY_VERSION=v0.5.0-beta.1 bash || sudo PORTAL_PROXY_VERSION=v0.5.0-beta.1 bash; }
 ```
 
 The installer can be rerun to update Portal Proxy. It installs requirements,
