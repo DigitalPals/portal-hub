@@ -2,6 +2,8 @@
 set -euo pipefail
 
 REPO="${PORTAL_PROXY_REPO:-DigitalPals/portal-proxy}"
+INSTALLER_REF="${PORTAL_PROXY_INSTALLER_REF:-main}"
+INSTALLER_URL="${PORTAL_PROXY_INSTALLER_URL:-https://raw.githubusercontent.com/${REPO}/${INSTALLER_REF}/scripts/install-debian.sh}"
 VERSION="${PORTAL_PROXY_VERSION:-latest}"
 INSTALL_DIR="${PORTAL_PROXY_INSTALL_DIR:-/usr/local/bin}"
 STATE_DIR="${PORTAL_PROXY_STATE_DIR:-/var/lib/portal-proxy}"
@@ -21,9 +23,28 @@ die() {
 }
 
 need_root() {
-  if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    die "run as root, for example: curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install-debian.sh | sudo bash"
+  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+    return 0
   fi
+
+  command -v sudo >/dev/null 2>&1 || die "this installer needs root; re-run as root or install sudo"
+  command -v curl >/dev/null 2>&1 || die "curl is required to re-run installer through sudo"
+
+  log "not running as root; re-running through sudo"
+  curl -fsSL "$INSTALLER_URL" | sudo env \
+    PORTAL_PROXY_REPO="$REPO" \
+    PORTAL_PROXY_INSTALLER_REF="$INSTALLER_REF" \
+    PORTAL_PROXY_INSTALLER_URL="$INSTALLER_URL" \
+    PORTAL_PROXY_VERSION="$VERSION" \
+    PORTAL_PROXY_INSTALL_DIR="$INSTALL_DIR" \
+    PORTAL_PROXY_STATE_DIR="$STATE_DIR" \
+    PORTAL_PROXY_USER="$USER_NAME" \
+    PORTAL_PROXY_INSTALL_SSHD_MATCH="$INSTALL_SSHD_MATCH" \
+    PORTAL_PROXY_INSTALL_PRUNE_TIMER="$INSTALL_PRUNE_TIMER" \
+    PORTAL_PROXY_MAX_LOG_BYTES="$MAX_LOG_BYTES" \
+    PORTAL_PROXY_PRUNE_DAYS="$ENDED_OLDER_THAN_DAYS" \
+    bash
+  exit $?
 }
 
 check_os() {
