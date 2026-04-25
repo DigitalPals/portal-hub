@@ -459,6 +459,8 @@ fn attach_session(state: &State, request: AttachRequest) -> Result<()> {
         "-o".to_string(),
         "IdentitiesOnly=no".to_string(),
         "-o".to_string(),
+        "BatchMode=yes".to_string(),
+        "-o".to_string(),
         "StrictHostKeyChecking=accept-new".to_string(),
         "-o".to_string(),
         format!("UserKnownHostsFile={}", state.known_hosts_path().display()),

@@ -15,6 +15,9 @@ Portal connects to the proxy over SSH. The proxy starts the target SSH session
 inside `dtach`, records terminal output with `script`, and reconnects Portal to
 the same `dtach` session when Portal opens the session again.
 
+Target authentication is non-interactive. Portal should forward a local
+`ssh-agent`; the proxy does not need target private keys installed on disk.
+
 Typing `exit` in the remote shell ends the real target session. Closing Portal
 or losing network connectivity only detaches Portal from the session.
 

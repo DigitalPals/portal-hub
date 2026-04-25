@@ -145,6 +145,10 @@ Close the SSH client without typing `exit`, reconnect with the same session ID,
 and confirm the shell is still alive. Typing `exit` in the target shell should
 end the `dtach` session.
 
+Target SSH authentication is non-interactive. Portal forwards your local
+`ssh-agent` through the proxy connection; target private keys do not need to be
+installed on the proxy host.
+
 ## Log Retention
 
 Portal Proxy stores terminal output in:
