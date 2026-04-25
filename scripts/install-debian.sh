@@ -4,7 +4,7 @@ set -euo pipefail
 REPO="${PORTAL_PROXY_REPO:-DigitalPals/portal-proxy}"
 INSTALLER_REF="${PORTAL_PROXY_INSTALLER_REF:-main}"
 INSTALLER_URL="${PORTAL_PROXY_INSTALLER_URL:-https://raw.githubusercontent.com/${REPO}/${INSTALLER_REF}/scripts/install-debian.sh}"
-VERSION="${PORTAL_PROXY_VERSION:-latest}"
+RELEASE_VERSION="${PORTAL_PROXY_VERSION:-latest}"
 INSTALL_DIR="${PORTAL_PROXY_INSTALL_DIR:-/usr/local/bin}"
 STATE_DIR="${PORTAL_PROXY_STATE_DIR:-/var/lib/portal-proxy}"
 USER_NAME="${PORTAL_PROXY_USER:-portal-proxy}"
@@ -35,7 +35,7 @@ need_root() {
     PORTAL_PROXY_REPO="$REPO" \
     PORTAL_PROXY_INSTALLER_REF="$INSTALLER_REF" \
     PORTAL_PROXY_INSTALLER_URL="$INSTALLER_URL" \
-    PORTAL_PROXY_VERSION="$VERSION" \
+    PORTAL_PROXY_VERSION="$RELEASE_VERSION" \
     PORTAL_PROXY_INSTALL_DIR="$INSTALL_DIR" \
     PORTAL_PROXY_STATE_DIR="$STATE_DIR" \
     PORTAL_PROXY_USER="$USER_NAME" \
@@ -49,22 +49,23 @@ need_root() {
 
 check_os() {
   [ -r /etc/os-release ] || die "/etc/os-release not found"
-  # shellcheck disable=SC1091
-  . /etc/os-release
+  local os_id os_id_like
+  os_id="$(. /etc/os-release && printf '%s' "${ID:-}")"
+  os_id_like="$(. /etc/os-release && printf '%s' "${ID_LIKE:-}")"
 
-  case "${ID:-}" in
+  case "$os_id" in
     debian|ubuntu)
       return 0
       ;;
   esac
 
-  case " ${ID_LIKE:-} " in
+  case " ${os_id_like} " in
     *" debian "*)
       return 0
       ;;
   esac
 
-  die "this installer supports Debian/Ubuntu LXCs only; detected ID=${ID:-unknown}"
+  die "this installer supports Debian/Ubuntu LXCs only; detected ID=${os_id:-unknown}"
 }
 
 detect_asset() {
@@ -80,10 +81,10 @@ detect_asset() {
 
 release_url() {
   local asset="$1"
-  if [ "$VERSION" = "latest" ]; then
+  if [ "$RELEASE_VERSION" = "latest" ]; then
     printf 'https://github.com/%s/releases/latest/download/%s\n' "$REPO" "$asset"
   else
-    printf 'https://github.com/%s/releases/download/%s/%s\n' "$REPO" "$VERSION" "$asset"
+    printf 'https://github.com/%s/releases/download/%s/%s\n' "$REPO" "$RELEASE_VERSION" "$asset"
   fi
 }
 
@@ -140,7 +141,7 @@ install_binary() {
   tmpdir="$(mktemp -d)"
   archive="${tmpdir}/${asset}"
 
-  log "downloading ${VERSION} from ${url}"
+  log "downloading ${RELEASE_VERSION} from ${url}"
   curl -fsSL "$url" -o "$archive"
   tar -xzf "$archive" -C "$tmpdir"
 
