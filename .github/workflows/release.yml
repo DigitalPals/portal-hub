@@ -1,0 +1,23 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  linux-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/portal-proxy dist/portal-proxy-linux-x86_64
+          tar -C dist -czf portal-proxy-linux-x86_64.tar.gz portal-proxy-linux-x86_64
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: portal-proxy-linux-x86_64.tar.gz

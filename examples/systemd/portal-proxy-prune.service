@@ -1,0 +1,11 @@
+[Unit]
+Description=Prune old Portal Proxy sessions and logs
+
+[Service]
+Type=oneshot
+User=portal-proxy
+Group=portal-proxy
+Environment=PORTAL_PROXY_STATE_DIR=/var/lib/portal-proxy
+Environment=PORTAL_PROXY_MAX_LOG_BYTES=67108864
+Environment=PORTAL_PROXY_LOGGING_MODE=full
+ExecStart=/usr/local/bin/portal-proxy prune --ended-older-than-days 14

@@ -1,0 +1,9 @@
+[Unit]
+Description=Run Portal Proxy pruning daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
