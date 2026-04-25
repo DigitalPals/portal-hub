@@ -8,7 +8,8 @@ RELEASE_VERSION="${PORTAL_PROXY_VERSION:-latest}"
 INSTALL_DIR="${PORTAL_PROXY_INSTALL_DIR:-/usr/local/bin}"
 STATE_DIR="${PORTAL_PROXY_STATE_DIR:-/var/lib/portal-proxy}"
 USER_NAME="${PORTAL_PROXY_USER:-portal-proxy}"
-INSTALL_SSHD_MATCH="${PORTAL_PROXY_INSTALL_SSHD_MATCH:-1}"
+INSTALL_SSHD_CONFIG="${PORTAL_PROXY_INSTALL_SSHD_CONFIG:-${PORTAL_PROXY_INSTALL_SSHD_MATCH:-1}}"
+SSHD_PORT="${PORTAL_PROXY_SSH_PORT:-2222}"
 INSTALL_PRUNE_TIMER="${PORTAL_PROXY_INSTALL_PRUNE_TIMER:-1}"
 MAX_LOG_BYTES="${PORTAL_PROXY_MAX_LOG_BYTES:-67108864}"
 ENDED_OLDER_THAN_DAYS="${PORTAL_PROXY_PRUNE_DAYS:-14}"
@@ -39,7 +40,8 @@ need_root() {
     PORTAL_PROXY_INSTALL_DIR="$INSTALL_DIR" \
     PORTAL_PROXY_STATE_DIR="$STATE_DIR" \
     PORTAL_PROXY_USER="$USER_NAME" \
-    PORTAL_PROXY_INSTALL_SSHD_MATCH="$INSTALL_SSHD_MATCH" \
+    PORTAL_PROXY_INSTALL_SSHD_CONFIG="$INSTALL_SSHD_CONFIG" \
+    PORTAL_PROXY_SSH_PORT="$SSHD_PORT" \
     PORTAL_PROXY_INSTALL_PRUNE_TIMER="$INSTALL_PRUNE_TIMER" \
     PORTAL_PROXY_MAX_LOG_BYTES="$MAX_LOG_BYTES" \
     PORTAL_PROXY_PRUNE_DAYS="$ENDED_OLDER_THAN_DAYS" \
@@ -153,31 +155,66 @@ install_binary() {
   rm -rf "$tmpdir"
 }
 
-install_sshd_match() {
-  [ "$INSTALL_SSHD_MATCH" = "1" ] || return 0
+validate_sshd_port() {
+  case "$SSHD_PORT" in
+    ''|*[!0-9]*)
+      die "PORTAL_PROXY_SSH_PORT must be a numeric TCP port"
+      ;;
+  esac
+
+  [ "$SSHD_PORT" -ge 1 ] && [ "$SSHD_PORT" -le 65535 ] \
+    || die "PORTAL_PROXY_SSH_PORT must be between 1 and 65535"
+}
+
+current_sshd_ports() {
+  local sshd_bin="$1"
+  "$sshd_bin" -T 2>/dev/null | awk '$1 == "port" { print $2 }' | sort -n -u
+}
+
+reload_or_start_sshd() {
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd 2>/dev/null || true
+    systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null \
+      || systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+    return 0
+  fi
+
+  if command -v service >/dev/null 2>&1; then
+    service ssh reload 2>/dev/null || service sshd reload 2>/dev/null \
+      || service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || true
+  fi
+}
+
+install_sshd_config() {
+  [ "$INSTALL_SSHD_CONFIG" = "1" ] || return 0
   [ -d /etc/ssh/sshd_config.d ] || return 0
+  validate_sshd_port
 
   local config="/etc/ssh/sshd_config.d/99-portal-proxy.conf"
-  log "installing sshd hardening for user ${USER_NAME}"
-  cat > "$config" <<EOF
-Match User ${USER_NAME}
-    PasswordAuthentication no
-    KbdInteractiveAuthentication no
-    X11Forwarding no
-    AllowTcpForwarding no
-    PermitTunnel no
-    PermitTTY yes
-    AllowAgentForwarding yes
-EOF
-
   local sshd_bin
   sshd_bin="$(command -v sshd)"
   sshd_bin="$(readlink -f "$sshd_bin" 2>/dev/null || printf '%s' "$sshd_bin")"
   mkdir -p /run/sshd
+
+  local existing_ports written port
+  existing_ports="$(current_sshd_ports "$sshd_bin" || true)"
+  [ -n "$existing_ports" ] || existing_ports="22"
+
+  log "installing sshd port config for port ${SSHD_PORT}"
+  {
+    printf '# Managed by Portal Proxy installer.\n'
+    written=""
+    for port in $existing_ports "$SSHD_PORT"; do
+      case " $written " in
+        *" $port "*) continue ;;
+      esac
+      printf 'Port %s\n' "$port"
+      written="${written} ${port}"
+    done
+  } > "$config"
+
   if "$sshd_bin" -t; then
-    if command -v systemctl >/dev/null 2>&1; then
-      systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
-    fi
+    reload_or_start_sshd
   else
     rm -f "$config"
     die "sshd config validation failed; removed ${config}"
@@ -242,7 +279,7 @@ Next steps:
 
 3. In Portal settings, configure:
    Host: this LXC's Tailscale name or IP
-   Port: 22
+   Port: ${SSHD_PORT}
    Username: ${USER_NAME}
    Identity file: the private key matching the public key above
 
@@ -256,7 +293,7 @@ main() {
   install_packages
   ensure_user_and_dirs
   install_binary
-  install_sshd_match
+  install_sshd_config
   install_prune_timer
   run_doctor
   print_next_steps

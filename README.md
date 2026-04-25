@@ -63,9 +63,10 @@ curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scrip
 
 The installer checks for Debian/Ubuntu, installs required packages, creates the
 dedicated `portal-proxy` user, installs or updates the release binary, adds
-optional SSH hardening for that user, enables a daily prune timer, and runs
-`portal-proxy doctor`. Run it from a root shell or from a user with `sudo`; the
-script detects the current user and escalates through `sudo` when needed.
+an OpenSSH port config so SSH listens on the existing port plus `2222` by
+default, enables a daily prune timer, and runs `portal-proxy doctor`. Run it
+from a root shell or from a user with `sudo`; the script detects the current
+user and escalates through `sudo` when needed.
 
 Install a specific release:
 
@@ -76,6 +77,12 @@ curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scrip
 The default installer uses GitHub's `latest` release URL. For beta prereleases,
 set `PORTAL_PROXY_VERSION` explicitly if GitHub has not promoted that release as
 latest.
+
+Use a custom proxy SSH port:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | PORTAL_PROXY_SSH_PORT=2022 bash
+```
 
 ## Build
 
@@ -129,7 +136,7 @@ sudo -u portal-proxy portal-proxy prune --ended-older-than-days 14 --max-log-byt
 In Portal settings, enable Portal Proxy and configure:
 
 - Host: the proxy Tailscale DNS name or Tailscale IP
-- Port: the proxy SSH port
+- Port: `2222` unless you installed with a custom `PORTAL_PROXY_SSH_PORT`
 - Username: `portal-proxy`
 - Identity file: the private key matching the forced-command public key
 

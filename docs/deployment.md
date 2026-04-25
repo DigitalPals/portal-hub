@@ -30,12 +30,18 @@ For beta prereleases, pin the version:
 curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | PORTAL_PROXY_VERSION=v0.5.0-beta.1 bash
 ```
 
+Use a custom proxy SSH port:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | PORTAL_PROXY_SSH_PORT=2022 bash
+```
+
 The installer can be rerun to update Portal Proxy. It installs requirements,
 creates the `portal-proxy` user and state directory, installs the release
-binary, configures SSH hardening for that user when supported, enables daily
-pruning through systemd, and runs `portal-proxy doctor`. Run it from a root
-shell or from a user with `sudo`; the script detects the current user and
-escalates through `sudo` when needed.
+binary, configures OpenSSH to listen on the existing SSH port plus `2222` by
+default, enables daily pruning through systemd, and runs `portal-proxy doctor`.
+Run it from a root shell or from a user with `sudo`; the script detects the
+current user and escalates through `sudo` when needed.
 
 Manual package installation:
 
@@ -105,17 +111,11 @@ sudo chmod 0700 /home/portal-proxy/.ssh
 sudo chmod 0600 /home/portal-proxy/.ssh/authorized_keys
 ```
 
-Recommended `sshd_config` hardening for the proxy user:
+Recommended `sshd_config` port config:
 
 ```text
-Match User portal-proxy
-    PasswordAuthentication no
-    KbdInteractiveAuthentication no
-    X11Forwarding no
-    AllowTcpForwarding no
-    PermitTunnel no
-    PermitTTY yes
-    AllowAgentForwarding yes
+Port 22
+Port 2222
 ```
 
 Reload SSH:
@@ -129,13 +129,13 @@ sudo systemctl reload ssh
 From the Portal machine:
 
 ```sh
-ssh -A -tt portal-proxy@TAILSCALE_NAME -- portal-proxy doctor
+ssh -A -tt -p 2222 portal-proxy@TAILSCALE_NAME -- portal-proxy doctor
 ```
 
 Then test a target attach:
 
 ```sh
-ssh -A -tt portal-proxy@TAILSCALE_NAME -- portal-proxy attach \
+ssh -A -tt -p 2222 portal-proxy@TAILSCALE_NAME -- portal-proxy attach \
   --session-id 00000000-0000-0000-0000-000000000001 \
   --target-host TARGET_HOST \
   --target-user TARGET_USER
@@ -193,6 +193,7 @@ In Portal:
 
 - Enable Portal Proxy globally.
 - Set host to the proxy Tailscale name or IP.
+- Set port to `2222`.
 - Set username to `portal-proxy`.
 - Set the SSH key used in `authorized_keys`.
 - Enable Portal Proxy on individual SSH hosts.
