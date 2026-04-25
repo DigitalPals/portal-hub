@@ -32,8 +32,8 @@ fn attach_detach_reconnect_replay_and_exit() {
     first
         .reader
         .wait_for(b"PROXY_FIRST", Duration::from_secs(10));
-    first.child.kill().ok();
-    first.child.wait().ok();
+    first.stdin.write_all(&[0x1c]).unwrap();
+    wait_for_child_exit(&mut first.child, Duration::from_secs(10));
 
     let active = list_active_sessions(&state_dir.path);
     assert_eq!(active, 1);
