@@ -7,6 +7,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+
 fn portal_proxy() -> &'static str {
     env!("CARGO_BIN_EXE_portal-proxy")
 }
@@ -41,7 +43,7 @@ fn attach_detach_reconnect_replay_and_exit() {
         .reader
         .wait_for(b"PROXY_FIRST", Duration::from_secs(10));
     first.stdin.write_all(&[0x1c]).unwrap();
-    wait_for_child_exit(&mut first.child, Duration::from_secs(10));
+    wait_for_attach_exit(first, Duration::from_secs(10));
 
     let active = list_active_sessions(&state_dir.path);
     assert_eq!(active, 1);
@@ -57,15 +59,16 @@ fn attach_detach_reconnect_replay_and_exit() {
     second
         .reader
         .wait_for(b"PROXY_SECOND", Duration::from_secs(10));
-    wait_for_child_exit(&mut second.child, Duration::from_secs(10));
+    wait_for_attach_exit(second, Duration::from_secs(10));
 
     let active = list_active_sessions(&state_dir.path);
     assert_eq!(active, 0);
 }
 
 struct AttachProcess {
-    child: Child,
-    stdin: std::process::ChildStdin,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    child_killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    stdin: Box<dyn Write + Send>,
     reader: OutputReader,
 }
 
@@ -75,52 +78,51 @@ fn spawn_attach(
     home_dir: &Path,
     session_id: &str,
 ) -> AttachProcess {
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("open attach pty");
     let argv = vec![
-        portal_proxy().to_string(),
-        "--state-dir".to_string(),
-        state_dir.display().to_string(),
-        "--max-log-bytes".to_string(),
-        "1048576".to_string(),
-        "attach".to_string(),
-        "--session-id".to_string(),
-        session_id.to_string(),
-        "--target-host".to_string(),
-        "127.0.0.1".to_string(),
-        "--target-port".to_string(),
-        fixture.port.to_string(),
-        "--target-user".to_string(),
-        fixture.user.clone(),
-        "--cols".to_string(),
-        "80".to_string(),
-        "--rows".to_string(),
-        "24".to_string(),
+        portal_proxy().into(),
+        "--state-dir".into(),
+        state_dir.as_os_str().to_os_string(),
+        "--max-log-bytes".into(),
+        "1048576".into(),
+        "attach".into(),
+        "--session-id".into(),
+        session_id.into(),
+        "--target-host".into(),
+        "127.0.0.1".into(),
+        "--target-port".into(),
+        fixture.port.to_string().into(),
+        "--target-user".into(),
+        fixture.user.clone().into(),
+        "--cols".into(),
+        "80".into(),
+        "--rows".into(),
+        "24".into(),
     ];
-    let command = argv
-        .iter()
-        .map(|arg| shell_quote(arg))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let mut command = CommandBuilder::from_argv(argv);
+    command.env("HOME", home_dir);
+    command.env("SSH_AUTH_SOCK", &fixture.agent_sock);
+    command.env("TERM", "xterm-256color");
 
-    let mut child = Command::new(command_path("script"))
-        .env("HOME", home_dir)
-        .env("SSH_AUTH_SOCK", &fixture.agent_sock)
-        .arg("-q")
-        .arg("-e")
-        .arg("-f")
-        .arg("-c")
-        .arg(command)
-        .arg("/dev/null")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
+    let child = pair
+        .slave
+        .spawn_command(command)
         .expect("spawn portal-proxy attach");
-
-    let stdin = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
+    let child_killer = child.clone_killer();
+    let stdout = pair.master.try_clone_reader().expect("clone pty reader");
+    let stdin = pair.master.take_writer().expect("take pty writer");
     let reader = OutputReader::new(stdout);
     AttachProcess {
         child,
+        child_killer,
         stdin,
         reader,
     }
@@ -151,7 +153,7 @@ struct OutputReader {
 }
 
 impl OutputReader {
-    fn new(mut stdout: std::process::ChildStdout) -> Self {
+    fn new(mut stdout: Box<dyn Read + Send>) -> Self {
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let mut buf = [0u8; 4096];
@@ -196,15 +198,19 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-fn wait_for_child_exit(child: &mut Child, timeout: Duration) {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if child.try_wait().unwrap().is_some() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(100));
+fn wait_for_attach_exit(mut attach: AttachProcess, timeout: Duration) {
+    drop(attach.stdin);
+    let mut child_killer = attach.child_killer;
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(attach.child.wait());
+    });
+
+    if rx.recv_timeout(timeout).is_ok() {
+        return;
     }
-    child.kill().ok();
+
+    let _ = child_killer.kill();
     panic!("child did not exit within {:?}", timeout);
 }
 
@@ -421,21 +427,6 @@ fn parse_agent_pid(output: &str) -> u32 {
                 .and_then(|pid| pid.parse().ok())
         })
         .expect("ssh-agent did not print SSH_AGENT_PID")
-}
-
-fn shell_quote(value: &str) -> String {
-    if value.is_empty() {
-        return "''".to_string();
-    }
-
-    if value
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'-' | b'_'))
-    {
-        return value.to_string();
-    }
-
-    format!("'{}'", value.replace('\'', r#"'\''"#))
 }
 
 struct TempDir {
