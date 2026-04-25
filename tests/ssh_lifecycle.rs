@@ -13,7 +13,15 @@ fn portal_proxy() -> &'static str {
 
 #[test]
 fn attach_detach_reconnect_replay_and_exit() {
-    if missing_any(&["sshd", "ssh", "ssh-keygen", "dtach", "script"]) {
+    if missing_any(&[
+        "sshd",
+        "ssh",
+        "ssh-add",
+        "ssh-agent",
+        "ssh-keygen",
+        "dtach",
+        "script",
+    ]) {
         eprintln!("skipping SSH lifecycle test; required system dependencies are missing");
         return;
     }
@@ -95,6 +103,7 @@ fn spawn_attach(
 
     let mut child = Command::new(command_path("script"))
         .env("HOME", home_dir)
+        .env("SSH_AUTH_SOCK", &fixture.agent_sock)
         .arg("-q")
         .arg("-e")
         .arg("-f")
@@ -206,6 +215,8 @@ struct SshFixture {
     port: u16,
     client_key: PathBuf,
     sshd_log: PathBuf,
+    agent_sock: PathBuf,
+    agent_pid: u32,
 }
 
 impl SshFixture {
@@ -235,6 +246,13 @@ impl SshFixture {
                 .arg(&client_key),
         );
         fs::copy(client_key.with_extension("pub"), &authorized_keys)?;
+        let agent_sock = root.path.join("ssh-agent.sock");
+        let agent_pid = start_agent(&agent_sock);
+        run_success(
+            Command::new(command_path("ssh-add"))
+                .env("SSH_AUTH_SOCK", &agent_sock)
+                .arg(&client_key),
+        );
 
         let port = free_port();
         let user = std::env::var("USER").unwrap_or_else(|_| "runner".to_string());
@@ -282,6 +300,8 @@ LogLevel ERROR
             port,
             client_key,
             sshd_log,
+            agent_sock,
+            agent_pid,
         };
         fixture.wait_until_ready();
         Ok(fixture)
@@ -332,6 +352,11 @@ impl Drop for SshFixture {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        let _ = Command::new("kill")
+            .arg(self.agent_pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 
@@ -370,6 +395,32 @@ fn command_path(name: &str) -> PathBuf {
         String::from_utf8_lossy(&output.stderr)
     );
     PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+}
+
+fn start_agent(socket_path: &Path) -> u32 {
+    let output = Command::new(command_path("ssh-agent"))
+        .arg("-a")
+        .arg(socket_path)
+        .arg("-s")
+        .output()
+        .expect("start ssh-agent");
+    assert!(
+        output.status.success(),
+        "ssh-agent failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_agent_pid(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_agent_pid(output: &str) -> u32 {
+    output
+        .split(';')
+        .find_map(|part| {
+            part.trim()
+                .strip_prefix("SSH_AGENT_PID=")
+                .and_then(|pid| pid.parse().ok())
+        })
+        .expect("ssh-agent did not print SSH_AGENT_PID")
 }
 
 fn shell_quote(value: &str) -> String {
