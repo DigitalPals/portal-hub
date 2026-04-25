@@ -12,6 +12,7 @@
 - Added optional target allowlist with exact, wildcard, and IP CIDR patterns.
 - Added CLI and SSH lifecycle integration tests.
 - Added deployment docs, security policy, examples, release workflow, and CI.
+- Added Debian/Ubuntu LXC installer script for release installs and updates.
 
 ## 0.2.0
 

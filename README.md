@@ -53,6 +53,29 @@ separate disk quota or retention strategy.
 - `dtach`
 - `script` from util-linux
 
+## Install On Debian / Ubuntu LXC
+
+One-line installer:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | sudo bash
+```
+
+The installer checks for Debian/Ubuntu, installs required packages, creates the
+dedicated `portal-proxy` user, installs or updates the release binary, adds
+optional SSH hardening for that user, enables a daily prune timer, and runs
+`portal-proxy doctor`.
+
+Install a specific release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | sudo PORTAL_PROXY_VERSION=v0.5.0-beta.1 bash
+```
+
+The default installer uses GitHub's `latest` release URL. For beta prereleases,
+set `PORTAL_PROXY_VERSION` explicitly if GitHub has not promoted that release as
+latest.
+
 ## Build
 
 ```sh

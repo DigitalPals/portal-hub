@@ -20,6 +20,8 @@ jobs:
           sudo mkdir -p /run/sshd
       - name: Format
         run: cargo fmt --check
+      - name: Shell syntax
+        run: bash -n scripts/install-debian.sh
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Test

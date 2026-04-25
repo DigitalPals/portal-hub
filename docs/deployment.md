@@ -18,6 +18,25 @@ for reconnect replay and thumbnails.
 
 ## Packages
 
+Use the installer for a standard Debian/Ubuntu LXC:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | sudo bash
+```
+
+For beta prereleases, pin the version:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | sudo PORTAL_PROXY_VERSION=v0.5.0-beta.1 bash
+```
+
+The installer can be rerun to update Portal Proxy. It installs requirements,
+creates the `portal-proxy` user and state directory, installs the release
+binary, configures SSH hardening for that user when supported, enables daily
+pruning through systemd, and runs `portal-proxy doctor`.
+
+Manual package installation:
+
 ```sh
 sudo apt update
 sudo apt install -y openssh-server openssh-client dtach tailscale util-linux
