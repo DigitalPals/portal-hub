@@ -87,7 +87,7 @@ more checks failed.
 
 ```sh
 portal-proxy prune --dry-run
-portal-proxy prune --ended-older-than-days 14 --max-log-bytes 67108864
+portal-proxy prune --ended-older-than-days 14 --max-log-bytes 16777216
 ```
 
 Prune prints a JSON report with deleted sessions, truncated logs, and reclaimed

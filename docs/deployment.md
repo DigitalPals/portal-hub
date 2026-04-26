@@ -161,12 +161,12 @@ Use pruning regularly:
 
 ```sh
 sudo -u portal-proxy portal-proxy prune --dry-run
-sudo -u portal-proxy portal-proxy prune --ended-older-than-days 14 --max-log-bytes 67108864
+sudo -u portal-proxy portal-proxy prune --ended-older-than-days 14 --max-log-bytes 16777216
 ```
 
-Live session logs are capped by `PORTAL_PROXY_MAX_LOG_BYTES` by default. If a
-session exceeds that output limit, `script(1)` terminates the session to protect
-the proxy host from unbounded disk usage.
+Live session logs are retained as a moving window capped by
+`PORTAL_PROXY_MAX_LOG_BYTES` by default. Older replay output is discarded when
+needed, but the target session keeps running.
 
 Install the example systemd timer from `examples/systemd` to run pruning daily.
 

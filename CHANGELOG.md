@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0-beta.5 - 2026-04-26
+
+- Replaced live log output-limit termination with a bounded moving replay log
+  window so heavy-output sessions keep running.
+- Lowered the default replay log retention cap from 64 MiB to 16 MiB.
+- Added an internal recorder path that keeps live log compaction active inside
+  detached `dtach` sessions.
+
 ## 0.5.0-beta.4 - 2026-04-26
 
 - Forward terminal resize notifications through `dtach` attachments so Portal

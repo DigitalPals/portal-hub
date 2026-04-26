@@ -43,10 +43,10 @@ Those logs can contain secrets shown in terminals, including tokens, passwords,
 command output, and environment values. Treat the state directory as sensitive
 data. Use `portal-proxy prune` regularly.
 
-By default, live session logs have a hard 64 MiB output limit. This protects the
-proxy host from unbounded disk growth. When the limit is reached, `script(1)`
-terminates the session. Set `PORTAL_PROXY_MAX_LOG_BYTES=0` only if you have a
-separate disk quota or retention strategy.
+By default, live session logs use a 16 MiB moving window. This protects the
+proxy host from unbounded disk growth without terminating long-running target
+sessions that produce heavy output. Set `PORTAL_PROXY_MAX_LOG_BYTES=0` only if
+you have a separate disk quota or retention strategy.
 
 ## Requirements
 
@@ -74,7 +74,7 @@ user and escalates through `sudo` when needed.
 Install a specific release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | PORTAL_PROXY_VERSION=v0.5.0-beta.4 bash
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | PORTAL_PROXY_VERSION=v0.5.0-beta.5 bash
 ```
 
 The default installer uses GitHub's `latest` release URL. For beta prereleases,
@@ -131,7 +131,7 @@ sudo -u portal-proxy portal-proxy list --active
 Prune old ended sessions and trim ended-session logs:
 
 ```sh
-sudo -u portal-proxy portal-proxy prune --ended-older-than-days 14 --max-log-bytes 67108864
+sudo -u portal-proxy portal-proxy prune --ended-older-than-days 14 --max-log-bytes 16777216
 ```
 
 ## Portal Configuration
@@ -171,14 +171,14 @@ portal-proxy doctor --json
 portal-proxy version --json
 portal-proxy list --active --include-preview --format v1
 portal-proxy prune --dry-run
-portal-proxy prune --ended-older-than-days 14 --max-log-bytes 67108864
+portal-proxy prune --ended-older-than-days 14 --max-log-bytes 16777216
 ```
 
 Environment variables:
 
 ```text
 PORTAL_PROXY_STATE_DIR=/var/lib/portal-proxy
-PORTAL_PROXY_MAX_LOG_BYTES=67108864
+PORTAL_PROXY_MAX_LOG_BYTES=16777216
 PORTAL_PROXY_LOGGING_MODE=full
 PORTAL_PROXY_ALLOWED_TARGETS=*.internal,10.10.0.0/16
 ```
@@ -196,8 +196,8 @@ restricted to exact hostnames, `*` wildcard patterns, or IP CIDR ranges.
 
 - SSH terminal sessions only.
 - Target host authentication currently depends on SSH agent forwarding.
-- If the live log output limit is reached, the target session is terminated to
-  prevent unbounded disk usage.
+- Live replay logs are retained as a bounded moving window, so older terminal
+  output may be discarded while the target session continues running.
 - The project is still pre-1.0; compatibility is maintained deliberately, but
   breaking changes may happen before 1.0.
 

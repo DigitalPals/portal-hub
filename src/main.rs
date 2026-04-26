@@ -1,11 +1,15 @@
 use std::env;
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::Duration;
 
@@ -19,8 +23,9 @@ use uuid::Uuid;
 
 const DEFAULT_STATE_DIR: &str = "/var/lib/portal-proxy";
 const MAX_REPLAY_BYTES: u64 = 2 * 1024 * 1024;
-const DEFAULT_MAX_LOG_BYTES: u64 = 64 * 1024 * 1024;
+const DEFAULT_MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
 const DEFAULT_PRUNE_ENDED_OLDER_THAN_DAYS: i64 = 14;
+const LIVE_LOG_COMPACT_INTERVAL: Duration = Duration::from_millis(500);
 const API_VERSION: u16 = 1;
 const METADATA_SCHEMA_VERSION: u16 = 1;
 
@@ -31,7 +36,7 @@ struct Cli {
     #[arg(long, env = "PORTAL_PROXY_STATE_DIR", default_value = DEFAULT_STATE_DIR)]
     state_dir: PathBuf,
 
-    /// Maximum bytes to retain when pruning ended session logs. Set 0 to disable truncation.
+    /// Maximum bytes to retain for live and ended session logs. Set 0 to disable truncation.
     #[arg(
         long,
         env = "PORTAL_PROXY_MAX_LOG_BYTES",
@@ -107,6 +112,16 @@ enum CommandKind {
         cols: u16,
         #[arg(long, default_value_t = 24)]
         rows: u16,
+    },
+    /// Internal recorder used inside detached dtach sessions.
+    #[command(hide = true)]
+    Record {
+        #[arg(long)]
+        log_path: PathBuf,
+        #[arg(long)]
+        max_log_bytes: u64,
+        #[arg(long)]
+        command: String,
     },
 }
 
@@ -258,6 +273,11 @@ fn main() -> Result<()> {
                 allowed_targets,
             },
         ),
+        CommandKind::Record {
+            log_path,
+            max_log_bytes,
+            command,
+        } => record_session(&log_path, max_log_bytes, &command),
     }
 }
 
@@ -318,6 +338,9 @@ fn run_forced_command(state: &State) -> Result<()> {
                 allowed_targets: configured_allowed_targets(),
             },
         ),
+        Some(CommandKind::Record { .. }) => {
+            bail!("record is not available through forced-command mode")
+        }
         Some(CommandKind::Serve { .. }) | None => bail!("nested serve command is not supported"),
     }
 }
@@ -463,11 +486,11 @@ fn attach_session(state: &State, request: AttachRequest) -> Result<()> {
 
     match logging_mode {
         LoggingMode::Full => {
-            command.arg("script").arg("-q").arg("-f").arg("-a");
-            if max_log_bytes > 0 {
-                command.arg("--output-limit").arg(max_log_bytes.to_string());
-            }
-            command.arg("-c").arg(ssh_command).arg(&log_path);
+            command.arg("sh").arg("-lc").arg(record_session_command(
+                &log_path,
+                max_log_bytes,
+                &ssh_command,
+            )?);
         }
         LoggingMode::Disabled => {
             command.arg("sh").arg("-lc").arg(ssh_command);
@@ -503,6 +526,60 @@ fn attach_session(state: &State, request: AttachRequest) -> Result<()> {
         truncate_log_to_tail(&log_path, max_log_bytes)?;
     }
     state.save_session(&updated)?;
+
+    if status.success() {
+        return Ok(());
+    }
+
+    match status.code() {
+        Some(code) => std::process::exit(code),
+        None => std::process::exit(128 + status.signal().unwrap_or(1)),
+    }
+}
+
+fn record_session_command(
+    log_path: &Path,
+    max_log_bytes: u64,
+    target_command: &str,
+) -> Result<String> {
+    let executable =
+        env::current_exe().context("failed to resolve current portal-proxy executable")?;
+    Ok(shell_join([
+        executable.to_string_lossy().to_string(),
+        "record".to_string(),
+        "--log-path".to_string(),
+        log_path.to_string_lossy().to_string(),
+        "--max-log-bytes".to_string(),
+        max_log_bytes.to_string(),
+        "--command".to_string(),
+        target_command.to_string(),
+    ]))
+}
+
+fn record_session(log_path: &Path, max_log_bytes: u64, target_command: &str) -> Result<()> {
+    ensure_binary("script").context("install util-linux on the Portal Proxy host")?;
+
+    let mut child = Command::new("script")
+        .arg("-q")
+        .arg("-f")
+        .arg("-a")
+        .arg("-c")
+        .arg(target_command)
+        .arg(log_path)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("failed to start script recorder")?;
+
+    let compactor = LiveLogCompactor::start(log_path.to_path_buf(), max_log_bytes);
+    let status = child.wait().context("failed to wait for script recorder")?;
+    if let Some(compactor) = compactor {
+        compactor.stop();
+    }
+    if max_log_bytes > 0 {
+        truncate_log_to_tail(log_path, max_log_bytes)?;
+    }
 
     if status.success() {
         return Ok(());
@@ -609,7 +686,6 @@ fn doctor(state: &State, json: bool) -> Result<()> {
         binary_check("dtach", "required for detached session persistence"),
         binary_check("ssh", "required for outbound target connections"),
         binary_check("script", "required for replay logs and thumbnails"),
-        script_output_limit_check(),
         binary_check(
             "tailscale",
             "recommended because Portal Proxy is designed for Tailscale-only exposure",
@@ -661,33 +737,6 @@ fn binary_check(name: &str, purpose: &str) -> DoctorCheck {
             name: format!("binary:{}", name),
             ok: false,
             message: format!("failed to check '{}': {}", name, error),
-        },
-    }
-}
-
-fn script_output_limit_check() -> DoctorCheck {
-    match Command::new("script")
-        .arg("--help")
-        .stdin(Stdio::null())
-        .output()
-    {
-        Ok(output) if String::from_utf8_lossy(&output.stdout).contains("--output-limit") => {
-            DoctorCheck {
-                name: "script-output-limit".to_string(),
-                ok: true,
-                message: "script supports live log output limits".to_string(),
-            }
-        }
-        Ok(_) => DoctorCheck {
-            name: "script-output-limit".to_string(),
-            ok: false,
-            message: "script does not advertise --output-limit; live log caps may not work"
-                .to_string(),
-        },
-        Err(error) => DoctorCheck {
-            name: "script-output-limit".to_string(),
-            ok: false,
-            message: format!("failed to inspect script: {}", error),
         },
     }
 }
@@ -981,6 +1030,54 @@ fn file_size(path: impl AsRef<Path>) -> Result<u64> {
     }
 }
 
+struct LiveLogCompactor {
+    stop: Arc<AtomicBool>,
+    handle: thread::JoinHandle<()>,
+}
+
+impl LiveLogCompactor {
+    fn start(path: PathBuf, max_bytes: u64) -> Option<Self> {
+        if max_bytes == 0 {
+            return None;
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            while !thread_stop.load(Ordering::Relaxed) {
+                thread::sleep(LIVE_LOG_COMPACT_INTERVAL);
+                if thread_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let _ = compact_live_log_window(&path, max_bytes);
+            }
+        });
+
+        Some(Self { stop, handle })
+    }
+
+    fn stop(self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = self.handle.join();
+    }
+}
+
+fn live_log_compaction_target(max_bytes: u64) -> u64 {
+    if max_bytes <= 1 {
+        max_bytes
+    } else {
+        (max_bytes / 2).max(1)
+    }
+}
+
+fn compact_live_log_window(path: &Path, max_bytes: u64) -> Result<Option<(u64, u64)>> {
+    if max_bytes == 0 || file_size(path)? <= max_bytes {
+        return Ok(None);
+    }
+
+    truncate_log_to_tail_in_place(path, live_log_compaction_target(max_bytes))
+}
+
 fn log_truncation_sizes(path: &Path, max_bytes: u64) -> Result<Option<(u64, u64)>> {
     let before = file_size(path)?;
     if before <= max_bytes {
@@ -988,6 +1085,25 @@ fn log_truncation_sizes(path: &Path, max_bytes: u64) -> Result<Option<(u64, u64)
     }
 
     Ok(Some((before, max_bytes)))
+}
+
+fn truncate_log_to_tail_in_place(path: &Path, max_bytes: u64) -> Result<Option<(u64, u64)>> {
+    let Some((before, _after)) = log_truncation_sizes(path, max_bytes)? else {
+        return Ok(None);
+    };
+    let Some((bytes, _truncated)) = read_log_tail(path, max_bytes)? else {
+        return Ok(None);
+    };
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .with_context(|| format!("failed to open {} for truncation", path.display()))?;
+    file.write_all(&bytes)
+        .with_context(|| format!("failed to rewrite {}", path.display()))?;
+    file.flush()
+        .with_context(|| format!("failed to flush {}", path.display()))?;
+    Ok(Some((before, bytes.len() as u64)))
 }
 
 fn truncate_log_to_tail(path: &Path, max_bytes: u64) -> Result<Option<(u64, u64)>> {
@@ -1188,6 +1304,7 @@ fn shell_words(input: &str) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::MetadataExt;
 
     fn temp_state() -> State {
         State::new(env::temp_dir().join(format!("portal-proxy-test-{}", Uuid::new_v4())))
@@ -1240,6 +1357,18 @@ mod tests {
     }
 
     #[test]
+    fn record_session_command_uses_bounded_recorder() {
+        let command =
+            record_session_command(Path::new("/tmp/portal log"), 16, "ssh example.com").unwrap();
+
+        assert!(command.contains(" record "));
+        assert!(command.contains("--log-path"));
+        assert!(command.contains("--max-log-bytes 16"));
+        assert!(command.contains("'ssh example.com'"));
+        assert!(!command.contains("output-limit"));
+    }
+
+    #[test]
     fn strips_script_header_from_replay() {
         let mut bytes = b"Script started on today\nactual output\n".to_vec();
         strip_script_header(&mut bytes);
@@ -1269,6 +1398,35 @@ mod tests {
 
         assert_eq!(result, (6, 3));
         assert_eq!(bytes, b"def");
+    }
+
+    #[test]
+    fn active_log_compaction_keeps_tail_without_replacing_file() {
+        let path = env::temp_dir().join(format!("portal-proxy-test-{}.log", Uuid::new_v4()));
+        fs::write(&path, b"abcdef").unwrap();
+        let inode = fs::metadata(&path).unwrap().ino();
+
+        let result = truncate_log_to_tail_in_place(&path, 3).unwrap().unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(result, (6, 3));
+        assert_eq!(metadata.ino(), inode);
+        assert_eq!(bytes, b"def");
+    }
+
+    #[test]
+    fn live_log_compaction_uses_moving_window() {
+        let path = env::temp_dir().join(format!("portal-proxy-test-{}.log", Uuid::new_v4()));
+        fs::write(&path, b"abcdefghijkl").unwrap();
+
+        let result = compact_live_log_window(&path, 8).unwrap().unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(result, (12, 4));
+        assert_eq!(bytes, b"ijkl");
     }
 
     #[test]
