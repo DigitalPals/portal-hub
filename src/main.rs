@@ -459,7 +459,7 @@ fn attach_session(state: &State, request: AttachRequest) -> Result<()> {
     );
 
     let mut command = Command::new("dtach");
-    command.arg("-A").arg(&socket_path).arg("-r").arg("none");
+    command.arg("-A").arg(&socket_path).arg("-r").arg("winch");
 
     match logging_mode {
         LoggingMode::Full => {

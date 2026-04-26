@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.5.0-beta.1 - Unreleased
+## 0.5.0-beta.4 - 2026-04-26
+
+- Forward terminal resize notifications through `dtach` attachments so Portal
+  Proxy sessions update the remote shell size after the Portal window changes.
+
+## 0.5.0-beta.1 - 2026-04-25
 
 - Added versioned `list --format v1` API.
 - Added `version --json` compatibility endpoint.
