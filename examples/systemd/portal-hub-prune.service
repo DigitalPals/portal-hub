@@ -1,0 +1,11 @@
+[Unit]
+Description=Prune old Portal Hub sessions and logs
+
+[Service]
+Type=oneshot
+User=portal-hub
+Group=portal-hub
+Environment=PORTAL_HUB_STATE_DIR=/var/lib/portal-hub
+Environment=PORTAL_HUB_MAX_LOG_BYTES=16777216
+Environment=PORTAL_HUB_LOGGING_MODE=full
+ExecStart=/usr/local/bin/portal-hub prune --ended-older-than-days 14

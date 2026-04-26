@@ -1,12 +1,12 @@
-# Portal Proxy API
+# Portal Hub API
 
-Portal Proxy is executed over SSH forced commands. New clients should request
+Portal Hub is executed over SSH forced commands. New clients should request
 versioned JSON responses and reject unknown API versions.
 
 ## Version
 
 ```sh
-portal-proxy version --json
+portal-hub version --json
 ```
 
 Response:
@@ -23,7 +23,7 @@ Response:
 ## List Sessions
 
 ```sh
-portal-proxy list --active --include-preview --preview-bytes 524288 --format v1
+portal-hub list --active --include-preview --preview-bytes 524288 --format v1
 ```
 
 Response:
@@ -55,14 +55,84 @@ Response:
 Compatibility notes:
 
 - `api_version` is currently `1`.
-- Clients may continue to parse the legacy array output for older proxies.
+- New clients should call `portal-hub`.
 - `preview_base64` is omitted when `--include-preview` is not set or logging is
   disabled.
+
+## Sync
+
+```sh
+portal-hub sync get --format v1
+```
+
+Response:
+
+```json
+{
+  "api_version": 1,
+  "generated_at": "2026-04-25T00:00:00Z",
+  "revision": "0",
+  "profile": {
+    "hosts": { "hosts": [], "groups": [] },
+    "settings": {},
+    "snippets": { "snippets": [] }
+  },
+  "vault": { "keys": [] }
+}
+```
+
+Replace the sync profile only when the caller has the latest revision:
+
+```sh
+portal-hub sync put --expected-revision 0 --format v1 < sync-request.json
+```
+
+The request body is a JSON object with `profile` and `vault` fields. Portal Hub
+stores `profile` as readable JSON for hosts, settings, and snippets. The `vault`
+field stores encrypted private-key blobs; Portal encrypts and decrypts those
+keys locally, so Hub never receives the vault passphrase or decrypted private
+keys.
+
+If `--expected-revision` is stale, the command exits non-zero and leaves the
+stored profile unchanged.
+
+## Web Auth And HTTPS Sync
+
+Run the web server:
+
+```sh
+portal-hub web --bind 127.0.0.1:8080 --public-url https://hub.example.test
+```
+
+When no user exists, `GET /admin` presents the one-time owner setup wizard. The
+wizard asks for an account name, then starts a passkey registration ceremony.
+
+Portal desktop authenticates with OAuth authorization code + PKCE:
+
+```text
+GET /oauth/authorize?response_type=code&client_id=portal-desktop&redirect_uri=http://127.0.0.1:PORT/callback&code_challenge=...&code_challenge_method=S256&state=...
+POST /oauth/token
+```
+
+The browser page served by `GET /oauth/authorize` signs the user in with a
+passkey before issuing the OAuth authorization code.
+
+The token response contains a bearer `access_token` and `refresh_token`.
+Authenticated clients can call:
+
+```text
+GET /api/me
+GET /api/sync
+PUT /api/sync
+```
+
+`PUT /api/sync` accepts `expected_revision`, `profile`, and `vault`. A stale
+revision returns HTTP `409 Conflict`.
 
 ## Attach
 
 ```sh
-portal-proxy attach \
+portal-hub attach \
   --session-id 00000000-0000-0000-0000-000000000001 \
   --target-host example.internal \
   --target-port 22 \
@@ -77,7 +147,7 @@ the client detaches. Exiting the remote shell ends the session.
 ## Doctor
 
 ```sh
-portal-proxy doctor --json
+portal-hub doctor --json
 ```
 
 Reports dependency and state directory checks. A non-zero exit code means one or
@@ -86,8 +156,8 @@ more checks failed.
 ## Prune
 
 ```sh
-portal-proxy prune --dry-run
-portal-proxy prune --ended-older-than-days 14 --max-log-bytes 16777216
+portal-hub prune --dry-run
+portal-hub prune --ended-older-than-days 14 --max-log-bytes 16777216
 ```
 
 Prune prints a JSON report with deleted sessions, truncated logs, and reclaimed

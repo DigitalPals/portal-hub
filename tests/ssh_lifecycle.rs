@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
-fn portal_proxy() -> &'static str {
-    env!("CARGO_BIN_EXE_portal-proxy")
+fn portal_hub() -> &'static str {
+    env!("CARGO_BIN_EXE_portal-hub")
 }
 
 #[test]
@@ -29,8 +29,8 @@ fn attach_detach_reconnect_replay_and_exit() {
     }
 
     let fixture = SshFixture::start().expect("start local sshd fixture");
-    let state_dir = TempDir::new("portal-proxy-state");
-    let home_dir = TempDir::new("portal-proxy-home");
+    let state_dir = TempDir::new("portal-hub-state");
+    let home_dir = TempDir::new("portal-hub-home");
     let home_ssh = home_dir.path.join(".ssh");
     fs::create_dir_all(&home_ssh).unwrap();
     fs::copy(&fixture.client_key, home_ssh.join("id_ed25519")).unwrap();
@@ -92,7 +92,7 @@ fn spawn_attach(
         })
         .expect("open attach pty");
     let argv = vec![
-        portal_proxy().into(),
+        portal_hub().into(),
         "--state-dir".into(),
         state_dir.as_os_str().to_os_string(),
         "--max-log-bytes".into(),
@@ -119,7 +119,7 @@ fn spawn_attach(
     let child = pair
         .slave
         .spawn_command(command)
-        .expect("spawn portal-proxy attach");
+        .expect("spawn portal-hub attach");
     let child_killer = child.clone_killer();
     let stdout = pair.master.try_clone_reader().expect("clone pty reader");
     let stdin = pair.master.take_writer().expect("take pty writer");
@@ -133,7 +133,7 @@ fn spawn_attach(
 }
 
 fn list_active_sessions(state_dir: &Path) -> usize {
-    let output = Command::new(portal_proxy())
+    let output = Command::new(portal_hub())
         .arg("--state-dir")
         .arg(state_dir)
         .arg("list")
@@ -237,7 +237,7 @@ struct SshFixture {
 
 impl SshFixture {
     fn start() -> std::io::Result<Self> {
-        let root = TempDir::new("portal-proxy-sshd");
+        let root = TempDir::new("portal-hub-sshd");
         let host_key = root.path.join("host_ed25519");
         let client_key = root.path.join("client_ed25519");
         let authorized_keys = root.path.join("authorized_keys");

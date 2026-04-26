@@ -1,13 +1,12 @@
-# Portal Proxy
+# Portal Hub
 
-Portal Proxy keeps Portal SSH sessions alive when the Portal app or the local
+Portal Hub keeps Portal SSH sessions alive when the Portal app or the local
 machine disconnects. It is intended to run on a small Linux host or LXC that is
 reachable only over Tailscale.
 
 Status: beta. The core workflow works, the JSON API is versioned, lifecycle
 integration coverage exists, and operational safeguards are in place. The
-project is still pre-1.0, so compatibility is maintained deliberately but major
-changes may still happen before 1.0.
+project is still pre-1.0, and breaking changes may still happen before 1.0.
 
 ## How It Works
 
@@ -23,29 +22,49 @@ or losing network connectivity only detaches Portal from the session.
 
 ## Security Model
 
-Portal Proxy is designed for Tailscale-only access.
+Portal Hub is designed for Tailscale-only access.
 
 - Do not expose the proxy SSH port to the public internet.
 - Use Tailscale ACLs to restrict who can reach the proxy host.
 - Run the proxy as a dedicated non-root user.
 - Use OpenSSH `authorized_keys` forced-command options.
-- Keep `/var/lib/portal-proxy` private to the proxy user.
+- Keep `/var/lib/portal-hub` private to the proxy user.
 
-Portal Proxy uses SSH agent forwarding from Portal to connect onward to target
+Portal Hub uses SSH agent forwarding from Portal to connect onward to target
 hosts. Only enable it for environments where that trust model is acceptable.
+
+Portal Hub can also store Portal hosts, settings, snippets, and encrypted vault
+items for desktop sync. Hosts, settings, and snippets are readable in the Hub
+state directory. Private keys are stored only as Portal-encrypted blobs; Hub
+does not receive the vault passphrase or decrypted keys.
+
+For account-based desktop sync, run the optional web server:
+
+```sh
+portal-hub web --bind 127.0.0.1:8080 --public-url https://hub.example.test
+```
+
+On first visit, `/admin` creates the owner account with a passkey. Portal
+desktop signs in through the system browser with OAuth authorization code +
+PKCE, then stores Hub tokens in the OS keychain. Passkeys provide the user
+verification step; Portal Hub does not store user passwords.
+
+For local passkey testing, prefer `http://portal-hub.localhost:8080` over bare
+`localhost` because some passkey providers reject `localhost` as an account
+domain.
 
 ## Session Logs
 
-Portal Proxy stores terminal output in `/var/lib/portal-proxy/logs` so Portal
+Portal Hub stores terminal output in `/var/lib/portal-hub/logs` so Portal
 can replay and thumbnail session state after reconnecting.
 
 Those logs can contain secrets shown in terminals, including tokens, passwords,
 command output, and environment values. Treat the state directory as sensitive
-data. Use `portal-proxy prune` regularly.
+data. Use `portal-hub prune` regularly.
 
 By default, live session logs use a 16 MiB moving window. This protects the
 proxy host from unbounded disk growth without terminating long-running target
-sessions that produce heavy output. Set `PORTAL_PROXY_MAX_LOG_BYTES=0` only if
+sessions that produce heavy output. Set `PORTAL_HUB_MAX_LOG_BYTES=0` only if
 you have a separate disk quota or retention strategy.
 
 ## Requirements
@@ -61,30 +80,30 @@ you have a separate disk quota or retention strategy.
 One-line installer:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | bash
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-hub/main/scripts/install-debian.sh | bash
 ```
 
 The installer checks for Debian/Ubuntu, installs required packages, creates the
-dedicated `portal-proxy` user, installs or updates the release binary, adds
+dedicated `portal-hub` user, installs or updates the release binary, adds
 an OpenSSH port config so SSH listens on the existing port plus `2222` by
-default, enables a daily prune timer, and runs `portal-proxy doctor`. Run it
+default, enables a daily prune timer, and runs `portal-hub doctor`. Run it
 from a root shell or from a user with `sudo`; the script detects the current
 user and escalates through `sudo` when needed.
 
 Install a specific release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | PORTAL_PROXY_VERSION=v0.5.0-beta.5 bash
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-hub/main/scripts/install-debian.sh | PORTAL_HUB_VERSION=v0.5.0-beta.5 bash
 ```
 
 The default installer uses GitHub's `latest` release URL. For beta prereleases,
-set `PORTAL_PROXY_VERSION` explicitly if GitHub has not promoted that release as
+set `PORTAL_HUB_VERSION` explicitly if GitHub has not promoted that release as
 latest.
 
 Use a custom proxy SSH port:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | PORTAL_PROXY_SSH_PORT=2022 bash
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-hub/main/scripts/install-debian.sh | PORTAL_HUB_SSH_PORT=2022 bash
 ```
 
 ## Build
@@ -96,7 +115,7 @@ cargo build --release
 Install the binary:
 
 ```sh
-sudo install -m 0755 target/release/portal-proxy /usr/local/bin/portal-proxy
+sudo install -m 0755 target/release/portal-hub /usr/local/bin/portal-hub
 ```
 
 ## Basic Setup
@@ -104,59 +123,59 @@ sudo install -m 0755 target/release/portal-proxy /usr/local/bin/portal-proxy
 Create a dedicated user and state directory:
 
 ```sh
-sudo useradd --system --create-home --shell /bin/sh portal-proxy
-sudo install -d -o portal-proxy -g portal-proxy -m 0700 /var/lib/portal-proxy
-sudo install -d -o portal-proxy -g portal-proxy -m 0700 /home/portal-proxy/.ssh
+sudo useradd --system --create-home --shell /bin/sh portal-hub
+sudo install -d -o portal-hub -g portal-hub -m 0700 /var/lib/portal-hub
+sudo install -d -o portal-hub -g portal-hub -m 0700 /home/portal-hub/.ssh
 ```
 
 Add your Portal client public key to
-`/home/portal-proxy/.ssh/authorized_keys` with a forced command:
+`/home/portal-hub/.ssh/authorized_keys` with a forced command:
 
 ```text
-restrict,pty,agent-forwarding,command="/usr/local/bin/portal-proxy serve --stdio" ssh-ed25519 AAAA...
+restrict,pty,agent-forwarding,command="/usr/local/bin/portal-hub serve --stdio" ssh-ed25519 AAAA...
 ```
 
 Run the health check as the proxy user:
 
 ```sh
-sudo -u portal-proxy portal-proxy doctor
+sudo -u portal-hub portal-hub doctor
 ```
 
 List active sessions:
 
 ```sh
-sudo -u portal-proxy portal-proxy list --active
+sudo -u portal-hub portal-hub list --active
 ```
 
 Prune old ended sessions and trim ended-session logs:
 
 ```sh
-sudo -u portal-proxy portal-proxy prune --ended-older-than-days 14 --max-log-bytes 16777216
+sudo -u portal-hub portal-hub prune --ended-older-than-days 14 --max-log-bytes 16777216
 ```
 
 ## Portal Configuration
 
-In Portal settings, enable Portal Proxy and configure:
+In Portal settings, enable Portal Hub and configure:
 
 - Host: the proxy Tailscale DNS name or Tailscale IP
-- Port: `2222` unless you installed with a custom `PORTAL_PROXY_SSH_PORT`
-- Username: `portal-proxy`
+- Port: `2222` unless you installed with a custom `PORTAL_HUB_SSH_PORT`
+- Username: `portal-hub`
 - Identity file: the private key matching the forced-command public key
 
-Then enable Portal Proxy per SSH host.
+Then enable Portal Hub per SSH host.
 
 ## JSON API
 
 The legacy list output is a JSON array:
 
 ```sh
-portal-proxy list --active --include-preview
+portal-hub list --active --include-preview
 ```
 
 New clients should request the versioned format:
 
 ```sh
-portal-proxy list --active --include-preview --format v1
+portal-hub list --active --include-preview --format v1
 ```
 
 The versioned response contains `api_version`, `generated_at`, and `sessions`.
@@ -166,21 +185,23 @@ The versioned response contains `api_version`, `generated_at`, and `sessions`.
 Useful commands:
 
 ```sh
-portal-proxy doctor
-portal-proxy doctor --json
-portal-proxy version --json
-portal-proxy list --active --include-preview --format v1
-portal-proxy prune --dry-run
-portal-proxy prune --ended-older-than-days 14 --max-log-bytes 16777216
+portal-hub doctor
+portal-hub doctor --json
+portal-hub version --json
+portal-hub web --bind 127.0.0.1:8080
+portal-hub list --active --include-preview --format v1
+portal-hub sync get --format v1
+portal-hub prune --dry-run
+portal-hub prune --ended-older-than-days 14 --max-log-bytes 16777216
 ```
 
 Environment variables:
 
 ```text
-PORTAL_PROXY_STATE_DIR=/var/lib/portal-proxy
-PORTAL_PROXY_MAX_LOG_BYTES=16777216
-PORTAL_PROXY_LOGGING_MODE=full
-PORTAL_PROXY_ALLOWED_TARGETS=*.internal,10.10.0.0/16
+PORTAL_HUB_STATE_DIR=/var/lib/portal-hub
+PORTAL_HUB_MAX_LOG_BYTES=16777216
+PORTAL_HUB_LOGGING_MODE=full
+PORTAL_HUB_ALLOWED_TARGETS=*.internal,10.10.0.0/16
 ```
 
 Logging modes:
@@ -189,17 +210,21 @@ Logging modes:
 - `disabled`: do not store terminal output. Reconnect persistence still works,
   but replay and thumbnails are unavailable.
 
-`PORTAL_PROXY_ALLOWED_TARGETS` is optional. When set, attach requests are
+`PORTAL_HUB_ALLOWED_TARGETS` is optional. When set, attach requests are
 restricted to exact hostnames, `*` wildcard patterns, or IP CIDR ranges.
+
+Sync operations are revisioned. `portal-hub sync put` requires
+`--expected-revision` and rejects stale writes instead of merging or silently
+overwriting another device's changes.
 
 ## Known Limitations
 
 - SSH terminal sessions only.
 - Target host authentication currently depends on SSH agent forwarding.
+- Browser/PWA SSH is not part of this release.
 - Live replay logs are retained as a bounded moving window, so older terminal
   output may be discarded while the target session continues running.
-- The project is still pre-1.0; compatibility is maintained deliberately, but
-  breaking changes may happen before 1.0.
+- The project is still pre-1.0, and breaking changes may happen before 1.0.
 
 See [docs/deployment.md](docs/deployment.md) for a fuller LXC deployment guide
 and [docs/api.md](docs/api.md) for the JSON API contract.

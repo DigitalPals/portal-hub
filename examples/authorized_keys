@@ -1,1 +1,1 @@
-restrict,pty,agent-forwarding,command="/usr/local/bin/portal-proxy serve --stdio" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA_REPLACE_WITH_PORTAL_CLIENT_PUBLIC_KEY portal-proxy-client
+restrict,pty,agent-forwarding,command="/usr/local/bin/portal-hub serve --stdio" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA_REPLACE_WITH_PORTAL_CLIENT_PUBLIC_KEY portal-hub-client

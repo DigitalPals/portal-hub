@@ -34,6 +34,6 @@
 
 ## 0.1.0
 
-- Initial Portal Proxy prototype using OpenSSH, `dtach`, and `script`.
+- Initial Portal Hub prototype using OpenSSH, `dtach`, and `script`.
 - Supported persistent SSH terminal sessions, reconnect replay, active session
   listing, and thumbnails.

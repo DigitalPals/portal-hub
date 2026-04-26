@@ -1,6 +1,6 @@
 # Contributing
 
-Portal Proxy is pre-1.0. Keep changes conservative and operationally explicit.
+Portal Hub is pre-1.0. Keep changes conservative and operationally explicit.
 
 Before opening a pull request:
 

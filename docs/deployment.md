@@ -1,4 +1,4 @@
-# Portal Proxy Deployment
+# Portal Hub Deployment
 
 This guide targets a Debian or Ubuntu LXC reachable through Tailscale.
 
@@ -13,7 +13,7 @@ For personal use:
 512 MB swap
 ```
 
-Disk is the main resource to watch because Portal Proxy records terminal output
+Disk is the main resource to watch because Portal Hub records terminal output
 for reconnect replay and thumbnails.
 
 ## Packages
@@ -21,25 +21,25 @@ for reconnect replay and thumbnails.
 Use the installer for a standard Debian/Ubuntu LXC:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | bash
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-hub/main/scripts/install-debian.sh | bash
 ```
 
 For beta prereleases, pin the version:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | PORTAL_PROXY_VERSION=v0.5.0-beta.4 bash
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-hub/main/scripts/install-debian.sh | PORTAL_HUB_VERSION=v0.5.0-beta.4 bash
 ```
 
 Use a custom proxy SSH port:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-proxy/main/scripts/install-debian.sh | PORTAL_PROXY_SSH_PORT=2022 bash
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-hub/main/scripts/install-debian.sh | PORTAL_HUB_SSH_PORT=2022 bash
 ```
 
-The installer can be rerun to update Portal Proxy. It installs requirements,
-creates the `portal-proxy` user and state directory, installs the release
+The installer can be rerun to update Portal Hub. It installs requirements,
+creates the `portal-hub` user and state directory, installs the release
 binary, configures OpenSSH to listen on the existing SSH port plus `2222` by
-default, enables daily pruning through systemd, and runs `portal-proxy doctor`.
+default, enables daily pruning through systemd, and runs `portal-hub doctor`.
 Run it from a root shell or from a user with `sudo`; the script detects the
 current user and escalates through `sudo` when needed.
 
@@ -63,27 +63,27 @@ sudo tailscale up
 If Tailscale cannot access `/dev/net/tun`, either allow the device in the LXC
 configuration or run Tailscale in userspace networking mode.
 
-Restrict access with Tailscale ACLs. Portal Proxy assumes the SSH service is not
+Restrict access with Tailscale ACLs. Portal Hub assumes the SSH service is not
 reachable from the public internet.
 
 ## User And State
 
 ```sh
-sudo useradd --system --create-home --shell /bin/sh portal-proxy
-sudo install -d -o portal-proxy -g portal-proxy -m 0700 /var/lib/portal-proxy
-sudo install -d -o portal-proxy -g portal-proxy -m 0700 /home/portal-proxy/.ssh
+sudo useradd --system --create-home --shell /bin/sh portal-hub
+sudo install -d -o portal-hub -g portal-hub -m 0700 /var/lib/portal-hub
+sudo install -d -o portal-hub -g portal-hub -m 0700 /home/portal-hub/.ssh
 ```
 
 Install the built binary:
 
 ```sh
-sudo install -m 0755 target/release/portal-proxy /usr/local/bin/portal-proxy
+sudo install -m 0755 target/release/portal-hub /usr/local/bin/portal-hub
 ```
 
 Run:
 
 ```sh
-sudo -u portal-proxy portal-proxy doctor
+sudo -u portal-hub portal-hub doctor
 ```
 
 The doctor command checks dependencies, state directory permissions, and whether
@@ -94,21 +94,21 @@ the process is running as a non-root user.
 Add the Portal client public key to:
 
 ```text
-/home/portal-proxy/.ssh/authorized_keys
+/home/portal-hub/.ssh/authorized_keys
 ```
 
 Recommended key entry:
 
 ```text
-restrict,pty,agent-forwarding,command="/usr/local/bin/portal-proxy serve --stdio" ssh-ed25519 AAAA...
+restrict,pty,agent-forwarding,command="/usr/local/bin/portal-hub serve --stdio" ssh-ed25519 AAAA...
 ```
 
 Make sure permissions are strict:
 
 ```sh
-sudo chown -R portal-proxy:portal-proxy /home/portal-proxy/.ssh
-sudo chmod 0700 /home/portal-proxy/.ssh
-sudo chmod 0600 /home/portal-proxy/.ssh/authorized_keys
+sudo chown -R portal-hub:portal-hub /home/portal-hub/.ssh
+sudo chmod 0700 /home/portal-hub/.ssh
+sudo chmod 0600 /home/portal-hub/.ssh/authorized_keys
 ```
 
 Recommended `sshd_config` port config:
@@ -129,13 +129,13 @@ sudo systemctl reload ssh
 From the Portal machine:
 
 ```sh
-ssh -A -tt -p 2222 portal-proxy@TAILSCALE_NAME -- portal-proxy doctor
+ssh -A -tt -p 2222 portal-hub@TAILSCALE_NAME -- portal-hub doctor
 ```
 
 Then test a target attach:
 
 ```sh
-ssh -A -tt -p 2222 portal-proxy@TAILSCALE_NAME -- portal-proxy attach \
+ssh -A -tt -p 2222 portal-hub@TAILSCALE_NAME -- portal-hub attach \
   --session-id 00000000-0000-0000-0000-000000000001 \
   --target-host TARGET_HOST \
   --target-user TARGET_USER
@@ -151,31 +151,31 @@ installed on the proxy host.
 
 ## Log Retention
 
-Portal Proxy stores terminal output in:
+Portal Hub stores terminal output in:
 
 ```text
-/var/lib/portal-proxy/logs
+/var/lib/portal-hub/logs
 ```
 
 Use pruning regularly:
 
 ```sh
-sudo -u portal-proxy portal-proxy prune --dry-run
-sudo -u portal-proxy portal-proxy prune --ended-older-than-days 14 --max-log-bytes 16777216
+sudo -u portal-hub portal-hub prune --dry-run
+sudo -u portal-hub portal-hub prune --ended-older-than-days 14 --max-log-bytes 16777216
 ```
 
 Live session logs are retained as a moving window capped by
-`PORTAL_PROXY_MAX_LOG_BYTES` by default. Older replay output is discarded when
+`PORTAL_HUB_MAX_LOG_BYTES` by default. Older replay output is discarded when
 needed, but the target session keeps running.
 
 Install the example systemd timer from `examples/systemd` to run pruning daily.
 
 ## Optional Target Allowlist
 
-For shared proxy hosts, restrict which target hosts Portal Proxy may connect to:
+For shared proxy hosts, restrict which target hosts Portal Hub may connect to:
 
 ```text
-PORTAL_PROXY_ALLOWED_TARGETS=*.internal,10.10.0.0/16
+PORTAL_HUB_ALLOWED_TARGETS=*.internal,10.10.0.0/16
 ```
 
 Patterns support exact hostnames, `*` wildcards, and IP CIDR ranges.
@@ -185,7 +185,7 @@ Patterns support exact hostnames, `*` wildcards, and IP CIDR ranges.
 To avoid storing terminal output:
 
 ```text
-PORTAL_PROXY_LOGGING_MODE=disabled
+PORTAL_HUB_LOGGING_MODE=disabled
 ```
 
 Sessions still persist across disconnects, but replay and thumbnails are not
@@ -195,11 +195,11 @@ available.
 
 In Portal:
 
-- Enable Portal Proxy globally.
+- Enable Portal Hub globally.
 - Set host to the proxy Tailscale name or IP.
 - Set port to `2222`.
-- Set username to `portal-proxy`.
+- Set username to `portal-hub`.
 - Set the SSH key used in `authorized_keys`.
-- Enable Portal Proxy on individual SSH hosts.
+- Enable Portal Hub on individual SSH hosts.
 
-Portal Proxy currently supports SSH terminal sessions only.
+Portal Hub currently supports SSH terminal sessions only.

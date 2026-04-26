@@ -1,5 +1,5 @@
 [Unit]
-Description=Run Portal Proxy pruning daily
+Description=Run Portal Hub pruning daily
 
 [Timer]
 OnCalendar=daily

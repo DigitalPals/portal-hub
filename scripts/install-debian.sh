@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${PORTAL_PROXY_REPO:-DigitalPals/portal-proxy}"
-INSTALLER_REF="${PORTAL_PROXY_INSTALLER_REF:-main}"
-INSTALLER_URL="${PORTAL_PROXY_INSTALLER_URL:-https://raw.githubusercontent.com/${REPO}/${INSTALLER_REF}/scripts/install-debian.sh}"
-RELEASE_VERSION="${PORTAL_PROXY_VERSION:-latest}"
-INSTALL_DIR="${PORTAL_PROXY_INSTALL_DIR:-/usr/local/bin}"
-STATE_DIR="${PORTAL_PROXY_STATE_DIR:-/var/lib/portal-proxy}"
-USER_NAME="${PORTAL_PROXY_USER:-portal-proxy}"
-INSTALL_SSHD_CONFIG="${PORTAL_PROXY_INSTALL_SSHD_CONFIG:-${PORTAL_PROXY_INSTALL_SSHD_MATCH:-1}}"
-SSHD_PORT="${PORTAL_PROXY_SSH_PORT:-2222}"
-INSTALL_PRUNE_TIMER="${PORTAL_PROXY_INSTALL_PRUNE_TIMER:-1}"
-MAX_LOG_BYTES="${PORTAL_PROXY_MAX_LOG_BYTES:-16777216}"
-ENDED_OLDER_THAN_DAYS="${PORTAL_PROXY_PRUNE_DAYS:-14}"
+REPO="${PORTAL_HUB_REPO:-DigitalPals/portal-hub}"
+INSTALLER_REF="${PORTAL_HUB_INSTALLER_REF:-main}"
+INSTALLER_URL="${PORTAL_HUB_INSTALLER_URL:-https://raw.githubusercontent.com/${REPO}/${INSTALLER_REF}/scripts/install-debian.sh}"
+RELEASE_VERSION="${PORTAL_HUB_VERSION:-latest}"
+INSTALL_DIR="${PORTAL_HUB_INSTALL_DIR:-/usr/local/bin}"
+STATE_DIR="${PORTAL_HUB_STATE_DIR:-/var/lib/portal-hub}"
+USER_NAME="${PORTAL_HUB_USER:-portal-hub}"
+INSTALL_SSHD_CONFIG="${PORTAL_HUB_INSTALL_SSHD_CONFIG:-${PORTAL_HUB_INSTALL_SSHD_MATCH:-1}}"
+SSHD_PORT="${PORTAL_HUB_SSH_PORT:-2222}"
+INSTALL_PRUNE_TIMER="${PORTAL_HUB_INSTALL_PRUNE_TIMER:-1}"
+MAX_LOG_BYTES="${PORTAL_HUB_MAX_LOG_BYTES:-16777216}"
+ENDED_OLDER_THAN_DAYS="${PORTAL_HUB_PRUNE_DAYS:-14}"
 SSHD_RELOAD_STATUS="not changed"
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -36,7 +36,7 @@ else
 fi
 
 log() {
-  printf '%sportal-proxy%s %s\n' "$DIM" "$RESET" "$*"
+  printf '%sportal-hub%s %s\n' "$DIM" "$RESET" "$*"
 }
 
 step() {
@@ -58,7 +58,7 @@ die() {
 
 print_banner() {
   printf '\n'
-  printf '%s%sPortal Proxy Installer%s\n' "$BOLD" "$CYAN" "$RESET"
+  printf '%s%sPortal Hub Installer%s\n' "$BOLD" "$CYAN" "$RESET"
   printf '%sRepository:%s %s\n' "$DIM" "$RESET" "$REPO"
   printf '%sRelease:%s    %s\n' "$DIM" "$RESET" "$RELEASE_VERSION"
   printf '%sInstall dir:%s %s\n' "$DIM" "$RESET" "$INSTALL_DIR"
@@ -75,18 +75,18 @@ need_root() {
 
   log "not running as root; re-running through sudo"
   curl -fsSL "$INSTALLER_URL" | sudo env \
-    PORTAL_PROXY_REPO="$REPO" \
-    PORTAL_PROXY_INSTALLER_REF="$INSTALLER_REF" \
-    PORTAL_PROXY_INSTALLER_URL="$INSTALLER_URL" \
-    PORTAL_PROXY_VERSION="$RELEASE_VERSION" \
-    PORTAL_PROXY_INSTALL_DIR="$INSTALL_DIR" \
-    PORTAL_PROXY_STATE_DIR="$STATE_DIR" \
-    PORTAL_PROXY_USER="$USER_NAME" \
-    PORTAL_PROXY_INSTALL_SSHD_CONFIG="$INSTALL_SSHD_CONFIG" \
-    PORTAL_PROXY_SSH_PORT="$SSHD_PORT" \
-    PORTAL_PROXY_INSTALL_PRUNE_TIMER="$INSTALL_PRUNE_TIMER" \
-    PORTAL_PROXY_MAX_LOG_BYTES="$MAX_LOG_BYTES" \
-    PORTAL_PROXY_PRUNE_DAYS="$ENDED_OLDER_THAN_DAYS" \
+    PORTAL_HUB_REPO="$REPO" \
+    PORTAL_HUB_INSTALLER_REF="$INSTALLER_REF" \
+    PORTAL_HUB_INSTALLER_URL="$INSTALLER_URL" \
+    PORTAL_HUB_VERSION="$RELEASE_VERSION" \
+    PORTAL_HUB_INSTALL_DIR="$INSTALL_DIR" \
+    PORTAL_HUB_STATE_DIR="$STATE_DIR" \
+    PORTAL_HUB_USER="$USER_NAME" \
+    PORTAL_HUB_INSTALL_SSHD_CONFIG="$INSTALL_SSHD_CONFIG" \
+    PORTAL_HUB_SSH_PORT="$SSHD_PORT" \
+    PORTAL_HUB_INSTALL_PRUNE_TIMER="$INSTALL_PRUNE_TIMER" \
+    PORTAL_HUB_MAX_LOG_BYTES="$MAX_LOG_BYTES" \
+    PORTAL_HUB_PRUNE_DAYS="$ENDED_OLDER_THAN_DAYS" \
     bash
   exit $?
 }
@@ -113,7 +113,7 @@ check_os() {
 }
 
 installed_version() {
-  local binary="${INSTALL_DIR}/portal-proxy"
+  local binary="${INSTALL_DIR}/portal-hub"
   [ -x "$binary" ] || return 0
 
   "$binary" version --json 2>/dev/null \
@@ -124,7 +124,7 @@ installed_version() {
 detect_asset() {
   case "$(uname -m)" in
     x86_64|amd64)
-      printf 'portal-proxy-linux-x86_64.tar.gz'
+      printf 'portal-hub-linux-x86_64.tar.gz'
       ;;
     *)
       die "no prebuilt release asset for architecture $(uname -m)"
@@ -201,23 +201,23 @@ install_binary() {
   curl -fsSL "$url" -o "$archive"
   tar -xzf "$archive" -C "$tmpdir"
 
-  binary="$(find "$tmpdir" -maxdepth 2 -type f -name 'portal-proxy*' -perm -111 | head -n 1)"
-  [ -n "$binary" ] || die "release archive did not contain an executable portal-proxy binary"
+  binary="$(find "$tmpdir" -maxdepth 2 -type f -name 'portal-hub*' -perm -111 | head -n 1)"
+  [ -n "$binary" ] || die "release archive did not contain an executable portal-hub binary"
 
   install -d -m 0755 "$INSTALL_DIR"
-  install -m 0755 "$binary" "${INSTALL_DIR}/portal-proxy"
+  install -m 0755 "$binary" "${INSTALL_DIR}/portal-hub"
   rm -rf "$tmpdir"
 }
 
 validate_sshd_port() {
   case "$SSHD_PORT" in
     ''|*[!0-9]*)
-      die "PORTAL_PROXY_SSH_PORT must be a numeric TCP port"
+      die "PORTAL_HUB_SSH_PORT must be a numeric TCP port"
       ;;
   esac
 
   [ "$SSHD_PORT" -ge 1 ] && [ "$SSHD_PORT" -le 65535 ] \
-    || die "PORTAL_PROXY_SSH_PORT must be between 1 and 65535"
+    || die "PORTAL_HUB_SSH_PORT must be between 1 and 65535"
 }
 
 current_sshd_ports() {
@@ -277,7 +277,7 @@ install_sshd_config() {
   [ -d /etc/ssh/sshd_config.d ] || return 0
   validate_sshd_port
 
-  local config="/etc/ssh/sshd_config.d/99-portal-proxy.conf"
+  local config="/etc/ssh/sshd_config.d/99-portal-hub.conf"
   local sshd_bin
   sshd_bin="$(command -v sshd)"
   sshd_bin="$(readlink -f "$sshd_bin" 2>/dev/null || printf '%s' "$sshd_bin")"
@@ -289,7 +289,7 @@ install_sshd_config() {
 
   step "Configuring OpenSSH on port ${SSHD_PORT}"
   {
-    printf '# Managed by Portal Proxy installer.\n'
+    printf '# Managed by Portal Hub installer.\n'
     written=""
     for port in $existing_ports "$SSHD_PORT"; do
       case " $written " in
@@ -314,20 +314,20 @@ install_prune_timer() {
   [ -d /etc/systemd/system ] || return 0
 
   step "Installing daily prune timer"
-  cat > /etc/systemd/system/portal-proxy-prune.service <<EOF
+  cat > /etc/systemd/system/portal-hub-prune.service <<EOF
 [Unit]
-Description=Prune Portal Proxy ended sessions and logs
+Description=Prune Portal Hub ended sessions and logs
 
 [Service]
 Type=oneshot
 User=${USER_NAME}
-Environment=PORTAL_PROXY_STATE_DIR=${STATE_DIR}
-ExecStart=${INSTALL_DIR}/portal-proxy prune --ended-older-than-days ${ENDED_OLDER_THAN_DAYS} --max-log-bytes ${MAX_LOG_BYTES}
+Environment=PORTAL_HUB_STATE_DIR=${STATE_DIR}
+ExecStart=${INSTALL_DIR}/portal-hub prune --ended-older-than-days ${ENDED_OLDER_THAN_DAYS} --max-log-bytes ${MAX_LOG_BYTES}
 EOF
 
-  cat > /etc/systemd/system/portal-proxy-prune.timer <<EOF
+  cat > /etc/systemd/system/portal-hub-prune.timer <<EOF
 [Unit]
-Description=Run Portal Proxy pruning daily
+Description=Run Portal Hub pruning daily
 
 [Timer]
 OnCalendar=daily
@@ -338,12 +338,12 @@ WantedBy=timers.target
 EOF
 
   systemctl daemon-reload
-  systemctl enable --now portal-proxy-prune.timer
+  systemctl enable --now portal-hub-prune.timer
 }
 
 run_doctor() {
   step "Running doctor"
-  runuser -u "$USER_NAME" -- env PORTAL_PROXY_STATE_DIR="$STATE_DIR" "${INSTALL_DIR}/portal-proxy" doctor
+  runuser -u "$USER_NAME" -- env PORTAL_HUB_STATE_DIR="$STATE_DIR" "${INSTALL_DIR}/portal-hub" doctor
 }
 
 print_summary() {
@@ -352,27 +352,27 @@ print_summary() {
 
   printf '\n'
   if [ -z "$after" ]; then
-    warn "Portal Proxy installed, but the installed version could not be detected"
+    warn "Portal Hub installed, but the installed version could not be detected"
     return 0
   fi
 
   if [ -z "$before" ]; then
-    success "Portal Proxy installed successfully (${after})"
+    success "Portal Hub installed successfully (${after})"
   elif [ "$before" = "$after" ]; then
-    success "Portal Proxy reinstalled successfully (${before} -> ${after})"
+    success "Portal Hub reinstalled successfully (${before} -> ${after})"
   else
-    success "Portal Proxy updated successfully (${before} -> ${after})"
+    success "Portal Hub updated successfully (${before} -> ${after})"
   fi
 
-  success "Activated binary: ${INSTALL_DIR}/portal-proxy reports ${after}"
+  success "Activated binary: ${INSTALL_DIR}/portal-hub reports ${after}"
   if [ "$SSHD_RELOAD_STATUS" = "not changed" ]; then
     log "OpenSSH config was not changed"
   elif [ "$SSHD_RELOAD_STATUS" = "not reloaded" ]; then
     warn "OpenSSH reload could not be confirmed; check ssh/sshd manually"
   else
-    success "OpenSSH ${SSHD_RELOAD_STATUS}; new Portal Proxy SSH connections use ${after}"
+    success "OpenSSH ${SSHD_RELOAD_STATUS}; new Portal Hub SSH connections use ${after}"
   fi
-  log "Portal Proxy runs per SSH connection, so there is no long-running proxy daemon to restart"
+  log "Portal Hub runs per SSH connection, so there is no long-running proxy daemon to restart"
 }
 
 print_next_steps() {
@@ -390,7 +390,7 @@ ${BOLD}Next steps${RESET}
    ${home_dir}/.ssh/authorized_keys
 
    Use this forced-command prefix:
-   restrict,pty,agent-forwarding,command="${INSTALL_DIR}/portal-proxy serve --stdio" ssh-ed25519 AAAA...
+   restrict,pty,agent-forwarding,command="${INSTALL_DIR}/portal-hub serve --stdio" ssh-ed25519 AAAA...
 
 3. In Portal settings, configure:
    Host: this LXC's Tailscale name or IP
