@@ -14,7 +14,7 @@ Response:
 
 ```json
 {
-  "version": "0.5.0-beta.5",
+  "version": "0.5.0-beta.6",
   "api_version": 1,
   "metadata_schema_version": 1,
   "min_portal_api_version": 1
@@ -142,7 +142,7 @@ Example:
 ```json
 {
   "api_version": 2,
-  "version": "0.5.0-beta.5",
+  "version": "0.5.0-beta.6",
   "public_url": "https://hub.example.test",
   "capabilities": {
     "sync_v2": true,

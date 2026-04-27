@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.0-beta.6 - 2026-04-27
+
+- Fixed GitHub release packaging after the project rename so the installer can
+  download `portal-hub-linux-x86_64.tar.gz`.
+
 ## 0.5.0-beta.5 - 2026-04-26
 
 - Replaced live log output-limit termination with a bounded moving replay log

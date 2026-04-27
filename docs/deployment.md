@@ -27,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-hub/main/scripts
 For beta prereleases, pin the version:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-hub/main/scripts/install-debian.sh | PORTAL_HUB_VERSION=v0.5.0-beta.5 bash
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-hub/main/scripts/install-debian.sh | PORTAL_HUB_VERSION=v0.5.0-beta.6 bash
 ```
 
 Use a custom proxy SSH port:
