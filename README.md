@@ -46,7 +46,7 @@ For Portal desktop sign-in, sync, session listing, and WebSocket terminal
 transport, run the web server:
 
 ```sh
-portal-hub web --bind 127.0.0.1:8080 --public-url https://hub.example.test
+portal-hub web --bind 0.0.0.0:8080 --public-url https://hub.example.test
 ```
 
 On first visit, `/admin` creates the owner account with a password. Portal
@@ -194,7 +194,7 @@ Useful commands:
 portal-hub doctor
 portal-hub doctor --json
 portal-hub version --json
-portal-hub web --bind 127.0.0.1:8080
+portal-hub web --bind 0.0.0.0:8080
 systemctl status portal-hub-web
 portal-hub list --active --include-preview --format v1
 portal-hub sync get --format v1

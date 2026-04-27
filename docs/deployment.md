@@ -39,20 +39,21 @@ curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-hub/main/scripts
 The installer can be rerun to update Portal Hub. It installs requirements,
 creates the `portal-hub` user and state directory, installs the release binary,
 configures OpenSSH to listen on the existing SSH port plus `2222` by default,
-installs `portal-hub-web.service` on `127.0.0.1:8080`, enables daily pruning
+installs `portal-hub-web.service` on `0.0.0.0:8080`, enables daily pruning
 through systemd, and runs `portal-hub doctor`. Run it from a root shell or from
 a user with `sudo`; the script detects the current user and escalates through
 `sudo` when needed.
 
-If you want the web service to bind somewhere else:
+If you want the web service to bind somewhere else, such as loopback for a
+reverse proxy:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-hub/main/scripts/install-debian.sh | PORTAL_HUB_WEB_BIND=0.0.0.0:8080 bash
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-hub/main/scripts/install-debian.sh | PORTAL_HUB_WEB_BIND=127.0.0.1:8080 bash
 ```
 
-Only bind to a non-loopback address on hosts that are reachable exclusively over
-Tailscale or another private network. For HTTPS, keep the service on loopback and
-publish it with Tailscale Serve or another reverse proxy.
+The default bind is intended for hosts that are reachable only over Tailscale or
+another private network. For HTTPS, bind the service on loopback and publish it
+with Tailscale Serve or another reverse proxy.
 
 Manual package installation:
 

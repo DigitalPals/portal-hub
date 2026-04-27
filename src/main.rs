@@ -127,7 +127,7 @@ enum CommandKind {
     },
     /// Run the Portal Hub HTTPS/web authentication and sync API server.
     Web {
-        #[arg(long, default_value = "127.0.0.1:8080")]
+        #[arg(long, default_value = "0.0.0.0:8080")]
         bind: String,
         #[arg(long)]
         public_url: Option<String>,

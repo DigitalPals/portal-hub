@@ -102,7 +102,7 @@ stored profile unchanged.
 Run the web server:
 
 ```sh
-portal-hub web --bind 127.0.0.1:8080 --public-url https://hub.example.test
+portal-hub web --bind 0.0.0.0:8080 --public-url https://hub.example.test
 ```
 
 When no user exists, `GET /admin` presents the one-time owner setup wizard. The
