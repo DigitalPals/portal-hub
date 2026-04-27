@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0-beta.8 - 2026-04-27
+
+- Restart the web service during installer updates so it does not keep running
+  a deleted binary after reinstalling.
+- Resolve Portal Hub child process spawns through the installed binary when the
+  current executable path points at a replaced inode.
+
 ## 0.5.0-beta.7 - 2026-04-27
 
 - Added Tailscale Serve public URL support for installer-managed web services.

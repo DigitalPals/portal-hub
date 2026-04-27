@@ -770,8 +770,7 @@ fn record_session_command(
     max_log_bytes: u64,
     target_command: &str,
 ) -> Result<String> {
-    let executable =
-        env::current_exe().context("failed to resolve current portal-hub executable")?;
+    let executable = portal_hub_executable().context("failed to resolve portal-hub executable")?;
     Ok(shell_join([
         executable.to_string_lossy().to_string(),
         "record".to_string(),
@@ -782,6 +781,45 @@ fn record_session_command(
         "--command".to_string(),
         target_command.to_string(),
     ]))
+}
+
+fn portal_hub_executable() -> Result<PathBuf> {
+    let current = env::current_exe().context("failed to resolve current portal-hub executable")?;
+    if current.exists() {
+        return Ok(current);
+    }
+
+    if let Some(path) = current
+        .to_string_lossy()
+        .strip_suffix(" (deleted)")
+        .map(PathBuf::from)
+    {
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
+    if let Some(argv0) = env::args_os().next() {
+        let path = PathBuf::from(argv0);
+        if path.is_absolute() && path.exists() {
+            return Ok(path);
+        }
+        if path.components().count() > 1 {
+            let absolute = env::current_dir()
+                .context("failed to resolve current directory")?
+                .join(&path);
+            if absolute.exists() {
+                return Ok(absolute);
+            }
+        }
+    }
+
+    let installed = PathBuf::from("/usr/local/bin/portal-hub");
+    if installed.exists() {
+        return Ok(installed);
+    }
+
+    Ok(current)
 }
 
 fn record_session(log_path: &Path, max_log_bytes: u64, target_command: &str) -> Result<()> {

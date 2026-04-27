@@ -390,8 +390,8 @@ WantedBy=multi-user.target
 EOF
 
   systemctl daemon-reload
-  if systemctl enable --now portal-hub-web.service; then
-    success "Portal Hub web service enabled on ${WEB_BIND}"
+  if systemctl enable portal-hub-web.service && systemctl restart portal-hub-web.service; then
+    success "Portal Hub web service enabled and restarted on ${WEB_BIND}"
   else
     warn "Portal Hub web service could not be started; check journalctl -u portal-hub-web"
   fi

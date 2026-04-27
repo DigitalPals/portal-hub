@@ -993,7 +993,7 @@ fn spawn_attach_command(
     controlling_tty: bool,
 ) -> Result<Box<dyn portable_pty::Child + Send + Sync>> {
     let mut command =
-        CommandBuilder::new(std::env::current_exe().context("failed to resolve executable")?);
+        CommandBuilder::new(portal_hub_executable().context("failed to resolve executable")?);
     command.set_controlling_tty(controlling_tty);
     command.arg("--state-dir");
     command.arg(state.state_dir.to_string_lossy().to_string());
@@ -1019,6 +1019,46 @@ fn spawn_attach_command(
     slave
         .spawn_command(command)
         .context("failed to start Portal Hub terminal session")
+}
+
+fn portal_hub_executable() -> Result<PathBuf> {
+    let current =
+        std::env::current_exe().context("failed to resolve current portal-hub executable")?;
+    if current.exists() {
+        return Ok(current);
+    }
+
+    if let Some(path) = current
+        .to_string_lossy()
+        .strip_suffix(" (deleted)")
+        .map(PathBuf::from)
+    {
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
+    if let Some(argv0) = std::env::args_os().next() {
+        let path = PathBuf::from(argv0);
+        if path.is_absolute() && path.exists() {
+            return Ok(path);
+        }
+        if path.components().count() > 1 {
+            let absolute = std::env::current_dir()
+                .context("failed to resolve current directory")?
+                .join(&path);
+            if absolute.exists() {
+                return Ok(absolute);
+            }
+        }
+    }
+
+    let installed = PathBuf::from("/usr/local/bin/portal-hub");
+    if installed.exists() {
+        return Ok(installed);
+    }
+
+    Ok(current)
 }
 
 impl Drop for TerminalPty {
