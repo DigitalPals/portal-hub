@@ -10,9 +10,12 @@ project is still pre-1.0, and breaking changes may still happen before 1.0.
 
 ## How It Works
 
-Portal connects to the proxy over SSH. The proxy starts the target SSH session
-inside `dtach`, records terminal output with `script`, and reconnects Portal to
-the same `dtach` session when Portal opens the session again.
+Portal signs in to the Hub web service with OAuth + PKCE and opens persistent
+terminal streams over an authenticated WebSocket. The Hub starts the target SSH
+session inside `dtach`, records terminal output with `script`, and reconnects
+Portal to the same `dtach` session when Portal opens the session again. The
+legacy SSH forced-command mode remains available for manual operation and older
+clients.
 
 Target authentication is non-interactive. Portal should forward a local
 `ssh-agent`; the proxy does not need target private keys installed on disk.
@@ -27,7 +30,8 @@ Portal Hub is designed for Tailscale-only access.
 - Do not expose the proxy SSH port to the public internet.
 - Use Tailscale ACLs to restrict who can reach the proxy host.
 - Run the proxy as a dedicated non-root user.
-- Use OpenSSH `authorized_keys` forced-command options.
+- Use the OAuth web API over Tailscale or behind an HTTPS reverse proxy.
+- Keep the legacy OpenSSH forced-command entry restricted if you enable it.
 - Keep `/var/lib/portal-hub` private to the proxy user.
 
 Portal Hub uses SSH agent forwarding from Portal to connect onward to target
@@ -38,7 +42,8 @@ items for desktop sync. Hosts, settings, and snippets are readable in the Hub
 state directory. Private keys are stored only as Portal-encrypted blobs; Hub
 does not receive the vault passphrase or decrypted keys.
 
-For account-based desktop sync, run the optional web server:
+For Portal desktop sign-in, sync, session listing, and WebSocket terminal
+transport, run the web server:
 
 ```sh
 portal-hub web --bind 127.0.0.1:8080 --public-url https://hub.example.test
@@ -160,9 +165,10 @@ Portal opens the Hub OAuth page in your browser. After sign-in, choose which
 services to enable: hosts sync, settings sync, snippets sync, key vault, and
 persistent sessions / proxy.
 
-Desktop sync and session listing use the OAuth web API. Persistent proxy
-sessions continue to use the SSH forced-command connection with local
-`ssh-agent` forwarding.
+Desktop sync, session listing, and persistent proxy sessions use the OAuth web
+API. Portal sends local private-key material only for the lifetime of a WebSocket
+terminal request when a host is configured for public-key auth; Hub stores it in
+a temporary `0600` identity file and removes it when the terminal stream ends.
 
 ## JSON API
 
@@ -189,6 +195,7 @@ portal-hub doctor
 portal-hub doctor --json
 portal-hub version --json
 portal-hub web --bind 127.0.0.1:8080
+systemctl status portal-hub-web
 portal-hub list --active --include-preview --format v1
 portal-hub sync get --format v1
 portal-hub prune --dry-run

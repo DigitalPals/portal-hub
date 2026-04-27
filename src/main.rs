@@ -826,6 +826,7 @@ fn configured_max_log_bytes() -> u64 {
         .unwrap_or(DEFAULT_MAX_LOG_BYTES)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn target_ssh_command(
     rows: u16,
     cols: u16,

@@ -14,7 +14,7 @@ Response:
 
 ```json
 {
-  "version": "0.5.0-beta.4",
+  "version": "0.5.0-beta.5",
   "api_version": 1,
   "metadata_schema_version": 1,
   "min_portal_api_version": 1
@@ -56,7 +56,7 @@ Response:
 Compatibility notes:
 
 - `api_version` is currently `1`.
-- New clients should call `portal-hub`.
+- New CLI clients should call `portal-hub list --format v1`.
 - `preview_base64` is omitted when `--include-preview` is not set or logging is
   disabled.
 
@@ -128,12 +128,32 @@ GET /api/sync
 PUT /api/sync
 GET /api/sync/v2
 PUT /api/sync/v2
+GET /api/sync/v2/events
 GET /api/sessions
+GET /api/sessions/terminal
 ```
 
 `GET /api/info` is public metadata for desktop onboarding. It returns the Hub
 version, public URL, and capability flags so clients can derive OAuth and proxy
 settings from a host plus web port.
+
+Example:
+
+```json
+{
+  "api_version": 2,
+  "version": "0.5.0-beta.5",
+  "public_url": "https://hub.example.test",
+  "capabilities": {
+    "sync_v2": true,
+    "sync_events": true,
+    "web_proxy": true,
+    "key_vault": true
+  },
+  "ssh_port": 2222,
+  "ssh_username": "portal-hub"
+}
+```
 
 `PUT /api/sync` accepts `expected_revision`, `profile`, and `vault`. A stale
 revision returns HTTP `409 Conflict`.
@@ -144,9 +164,20 @@ revision returns HTTP `409 Conflict`.
 contain `expected_revision`, `payload`, and optional `tombstones`; stale service
 revisions return HTTP `409 Conflict`.
 
+`GET /api/sync/v2/events` is a bearer-authenticated SSE stream. It emits `sync`
+events with the latest service revision map so Portal can run background sync
+after another device updates the Hub.
+
 `GET /api/sessions` requires a bearer token and returns the versioned session
 list used by Portal's active-session picker. `active=true`, `include_preview`,
 and `preview_bytes` are supported query parameters.
+
+`GET /api/sessions/terminal` upgrades to a bearer-authenticated WebSocket. The
+first client message is a JSON terminal start request with `session_id`,
+`target_host`, `target_port`, `target_user`, `cols`, `rows`, and optional
+`private_key`. Hub replies with `{"type":"started"}` or `{"type":"error"}`.
+Binary WebSocket messages carry terminal input and output. Resize control
+messages use `{"type":"resize","cols":120,"rows":30}`.
 
 ## Attach
 

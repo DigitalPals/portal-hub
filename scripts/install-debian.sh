@@ -10,6 +10,9 @@ STATE_DIR="${PORTAL_HUB_STATE_DIR:-/var/lib/portal-hub}"
 USER_NAME="${PORTAL_HUB_USER:-portal-hub}"
 INSTALL_SSHD_CONFIG="${PORTAL_HUB_INSTALL_SSHD_CONFIG:-${PORTAL_HUB_INSTALL_SSHD_MATCH:-1}}"
 SSHD_PORT="${PORTAL_HUB_SSH_PORT:-2222}"
+INSTALL_WEB_SERVICE="${PORTAL_HUB_INSTALL_WEB_SERVICE:-1}"
+WEB_BIND="${PORTAL_HUB_WEB_BIND:-127.0.0.1:8080}"
+PUBLIC_URL="${PORTAL_HUB_PUBLIC_URL:-}"
 INSTALL_PRUNE_TIMER="${PORTAL_HUB_INSTALL_PRUNE_TIMER:-1}"
 MAX_LOG_BYTES="${PORTAL_HUB_MAX_LOG_BYTES:-16777216}"
 ENDED_OLDER_THAN_DAYS="${PORTAL_HUB_PRUNE_DAYS:-14}"
@@ -84,6 +87,9 @@ need_root() {
     PORTAL_HUB_USER="$USER_NAME" \
     PORTAL_HUB_INSTALL_SSHD_CONFIG="$INSTALL_SSHD_CONFIG" \
     PORTAL_HUB_SSH_PORT="$SSHD_PORT" \
+    PORTAL_HUB_INSTALL_WEB_SERVICE="$INSTALL_WEB_SERVICE" \
+    PORTAL_HUB_WEB_BIND="$WEB_BIND" \
+    PORTAL_HUB_PUBLIC_URL="$PUBLIC_URL" \
     PORTAL_HUB_INSTALL_PRUNE_TIMER="$INSTALL_PRUNE_TIMER" \
     PORTAL_HUB_MAX_LOG_BYTES="$MAX_LOG_BYTES" \
     PORTAL_HUB_PRUNE_DAYS="$ENDED_OLDER_THAN_DAYS" \
@@ -341,6 +347,52 @@ EOF
   systemctl enable --now portal-hub-prune.timer
 }
 
+install_web_service() {
+  [ "$INSTALL_WEB_SERVICE" = "1" ] || return 0
+  command -v systemctl >/dev/null 2>&1 || return 0
+  [ -d /etc/systemd/system ] || return 0
+
+  case "$WEB_BIND" in
+    *[[:space:]]*) die "PORTAL_HUB_WEB_BIND must not contain whitespace" ;;
+  esac
+  case "$PUBLIC_URL" in
+    *[[:space:]]*) die "PORTAL_HUB_PUBLIC_URL must not contain whitespace" ;;
+  esac
+
+  local exec_start="${INSTALL_DIR}/portal-hub web --bind ${WEB_BIND}"
+  if [ -n "$PUBLIC_URL" ]; then
+    exec_start="${exec_start} --public-url ${PUBLIC_URL}"
+  fi
+
+  step "Installing Portal Hub web service"
+  cat > /etc/systemd/system/portal-hub-web.service <<EOF
+[Unit]
+Description=Portal Hub web API and OAuth service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${USER_NAME}
+Group=${USER_NAME}
+Environment=PORTAL_HUB_STATE_DIR=${STATE_DIR}
+Environment=PORTAL_HUB_SSH_PORT=${SSHD_PORT}
+ExecStart=${exec_start}
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  if systemctl enable --now portal-hub-web.service; then
+    success "Portal Hub web service enabled on ${WEB_BIND}"
+  else
+    warn "Portal Hub web service could not be started; check journalctl -u portal-hub-web"
+  fi
+}
+
 run_doctor() {
   step "Running doctor"
   runuser -u "$USER_NAME" -- env PORTAL_HUB_STATE_DIR="$STATE_DIR" "${INSTALL_DIR}/portal-hub" doctor
@@ -372,7 +424,9 @@ print_summary() {
   else
     success "OpenSSH ${SSHD_RELOAD_STATUS}; new Portal Hub SSH connections use ${after}"
   fi
-  log "Portal Hub runs per SSH connection, so there is no long-running proxy daemon to restart"
+  if [ "$INSTALL_WEB_SERVICE" = "1" ]; then
+    log "Portal Hub web API runs under systemd as portal-hub-web.service"
+  fi
 }
 
 print_next_steps() {
@@ -394,9 +448,14 @@ ${BOLD}Next steps${RESET}
 
 3. In Portal settings, configure:
    Host: this LXC's Tailscale name or IP
-   Port: ${SSHD_PORT}
-   Username: ${USER_NAME}
-   Identity file: the private key matching the public key above
+   Web port: ${WEB_BIND##*:}
+   Web URL: the HTTPS URL that reaches portal-hub-web.service
+
+   If you are using Tailscale Serve or another reverse proxy, point it at:
+   http://${WEB_BIND}
+
+   If this host is reachable only over Tailscale and you intentionally bind the
+   web service to a Tailscale/private address, use that HTTP URL in Portal.
 
 Update later by running this installer again.
 EOF
@@ -413,6 +472,7 @@ main() {
   install_binary
   version_after="$(installed_version || true)"
   install_sshd_config
+  install_web_service
   install_prune_timer
   run_doctor
   print_summary "$version_before" "$version_after"

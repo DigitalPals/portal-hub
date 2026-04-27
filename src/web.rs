@@ -1195,6 +1195,7 @@ fn sessions_socket_path(state_dir: &std::path::Path, id: Uuid) -> PathBuf {
     sockets_dir(state_dir).join(id.to_string())
 }
 
+#[allow(clippy::result_large_err)]
 fn authenticated_user(
     state: &AppState,
     headers: &HeaderMap,

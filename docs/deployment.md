@@ -27,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-hub/main/scripts
 For beta prereleases, pin the version:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-hub/main/scripts/install-debian.sh | PORTAL_HUB_VERSION=v0.5.0-beta.4 bash
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-hub/main/scripts/install-debian.sh | PORTAL_HUB_VERSION=v0.5.0-beta.5 bash
 ```
 
 Use a custom proxy SSH port:
@@ -37,11 +37,22 @@ curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-hub/main/scripts
 ```
 
 The installer can be rerun to update Portal Hub. It installs requirements,
-creates the `portal-hub` user and state directory, installs the release
-binary, configures OpenSSH to listen on the existing SSH port plus `2222` by
-default, enables daily pruning through systemd, and runs `portal-hub doctor`.
-Run it from a root shell or from a user with `sudo`; the script detects the
-current user and escalates through `sudo` when needed.
+creates the `portal-hub` user and state directory, installs the release binary,
+configures OpenSSH to listen on the existing SSH port plus `2222` by default,
+installs `portal-hub-web.service` on `127.0.0.1:8080`, enables daily pruning
+through systemd, and runs `portal-hub doctor`. Run it from a root shell or from
+a user with `sudo`; the script detects the current user and escalates through
+`sudo` when needed.
+
+If you want the web service to bind somewhere else:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DigitalPals/portal-hub/main/scripts/install-debian.sh | PORTAL_HUB_WEB_BIND=0.0.0.0:8080 bash
+```
+
+Only bind to a non-loopback address on hosts that are reachable exclusively over
+Tailscale or another private network. For HTTPS, keep the service on loopback and
+publish it with Tailscale Serve or another reverse proxy.
 
 Manual package installation:
 
@@ -89,7 +100,21 @@ sudo -u portal-hub portal-hub doctor
 The doctor command checks dependencies, state directory permissions, and whether
 the process is running as a non-root user.
 
-## SSH Forced Command
+## Web Service
+
+Portal desktop uses the web service for OAuth sign-in, sync, session listing,
+and persistent terminal WebSocket streams. With the installer, check it with:
+
+```sh
+sudo systemctl status portal-hub-web
+```
+
+Manual service installation can use
+`examples/systemd/portal-hub-web.service`. The service listens on HTTP; expose
+it through Tailscale Serve or another HTTPS reverse proxy when using a public
+URL.
+
+## Legacy SSH Forced Command
 
 Add the Portal client public key to:
 
@@ -126,6 +151,18 @@ sudo systemctl reload ssh
 
 ## Smoke Test
 
+Open the Hub admin page through the same URL Portal will use and create the
+owner account:
+
+```text
+https://hub.example.test/admin
+```
+
+Then use Portal's settings to authenticate through the browser.
+
+The legacy forced-command path can still be smoke-tested from the Portal
+machine:
+
 From the Portal machine:
 
 ```sh
@@ -145,9 +182,10 @@ Close the SSH client without typing `exit`, reconnect with the same session ID,
 and confirm the shell is still alive. Typing `exit` in the target shell should
 end the `dtach` session.
 
-Target SSH authentication is non-interactive. Portal forwards your local
-`ssh-agent` through the proxy connection; target private keys do not need to be
-installed on the proxy host.
+Target SSH authentication in legacy forced-command mode is non-interactive.
+Portal desktop's current web transport sends a temporary identity file for
+public-key hosts and uses interactive SSH auth inside the Hub terminal PTY when
+needed.
 
 ## Log Retention
 
@@ -197,9 +235,11 @@ In Portal:
 
 - Enable Portal Hub globally.
 - Set host to the proxy Tailscale name or IP.
-- Set port to `2222`.
-- Set username to `portal-hub`.
-- Set the SSH key used in `authorized_keys`.
+- Set web port to `8080`, unless you changed `PORTAL_HUB_WEB_BIND`.
+- Set Web URL to the HTTPS reverse-proxy or Tailscale Serve URL. If the web
+  service is bound directly to a Tailscale-only/private address, set the matching
+  `http://host:port` URL.
+- Sign in through the browser.
 - Enable Portal Hub on individual SSH hosts.
 
 Portal Hub currently supports SSH terminal sessions only.
