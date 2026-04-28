@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0-beta.11 - 2026-04-28
+
+- Added the authenticated `DELETE /api/sessions/{id}` endpoint so Portal and
+  Portal Android can kill active Portal Hub sessions.
+- Store process-group metadata for new `dtach` sessions so Hub can signal the
+  underlying session before removing it from active lists.
+
 ## 0.5.0-beta.9 - 2026-04-27
 
 - Hide `script` recorder headers from web session previews so thumbnails start

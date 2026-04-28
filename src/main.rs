@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::os::unix::process::ExitStatusExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -200,6 +200,8 @@ struct SessionMetadata {
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     ended_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    process_group_id: Option<i32>,
 }
 
 fn default_metadata_schema_version() -> u16 {
@@ -663,6 +665,7 @@ fn attach_session(state: &State, request: AttachRequest) -> Result<()> {
         .map(|mut existing| {
             existing.updated_at = now;
             existing.ended_at = None;
+            existing.process_group_id = None;
             existing
         })
         .unwrap_or(SessionMetadata {
@@ -675,6 +678,7 @@ fn attach_session(state: &State, request: AttachRequest) -> Result<()> {
             created_at: now,
             updated_at: now,
             ended_at: None,
+            process_group_id: None,
         });
     state.save_session(&metadata)?;
 
@@ -695,6 +699,7 @@ fn attach_session(state: &State, request: AttachRequest) -> Result<()> {
     );
 
     let mut command = Command::new("dtach");
+    command.process_group(0);
     command.arg("-A").arg(&socket_path).arg("-r").arg("winch");
 
     match logging_mode {
@@ -720,6 +725,11 @@ fn attach_session(state: &State, request: AttachRequest) -> Result<()> {
         .stderr(Stdio::inherit())
         .spawn()
         .context("failed to start dtach")?;
+    let process_group_id = i32::try_from(child.id()).ok();
+    let mut metadata = metadata;
+    metadata.process_group_id = process_group_id;
+    metadata.updated_at = Utc::now();
+    state.save_session(&metadata)?;
 
     if logging_mode == LoggingMode::Full && should_replay {
         thread::sleep(Duration::from_millis(75));
@@ -735,6 +745,9 @@ fn attach_session(state: &State, request: AttachRequest) -> Result<()> {
     } else {
         Some(updated.updated_at)
     };
+    if updated.ended_at.is_some() {
+        updated.process_group_id = None;
+    }
     if logging_mode == LoggingMode::Full && updated.ended_at.is_some() && max_log_bytes > 0 {
         truncate_log_to_tail(&log_path, max_log_bytes)?;
     }
@@ -1659,6 +1672,7 @@ mod tests {
             created_at: now,
             updated_at: ended_at.unwrap_or(now),
             ended_at,
+            process_group_id: None,
         }
     }
 

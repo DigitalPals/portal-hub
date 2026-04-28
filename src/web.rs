@@ -2,12 +2,14 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use argon2::password_hash::{SaltString, rand_core::OsRng};
@@ -18,7 +20,7 @@ use axum::extract::{Json, Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -216,7 +218,7 @@ enum WebTerminalControl {
     Resize { cols: u16, rows: u16 },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionMetadata {
     schema_version: u16,
     session_id: Uuid,
@@ -227,6 +229,8 @@ struct SessionMetadata {
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     ended_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    process_group_id: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -292,6 +296,7 @@ async fn run_async(
         .route("/api/info", get(api_info))
         .route("/api/me", get(api_me))
         .route("/api/sessions", get(api_sessions))
+        .route("/api/sessions/:id", delete(api_session_delete))
         .route("/api/sessions/terminal", get(api_session_terminal))
         .route("/api/sync", get(api_sync_get).put(api_sync_put))
         .route("/api/sync/v2", get(api_sync_v2_get).put(api_sync_v2_put))
@@ -811,6 +816,39 @@ async fn api_sessions(
                 "sessions": sessions,
             }))
             .into_response()
+        }
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+    }
+}
+
+async fn api_session_delete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(session_id): AxumPath<Uuid>,
+) -> Response {
+    let (user_id, _) = match authenticated_user(&state, &headers) {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+
+    match delete_session(&state.state_dir, session_id) {
+        Ok(killed) => {
+            audit(
+                &state,
+                "session_delete",
+                &user_id,
+                json!({"session_id": session_id, "process_signaled": killed}),
+            );
+            Json(json!({
+                "api_version": 2,
+                "session_id": session_id,
+                "deleted": true,
+                "process_signaled": killed,
+            }))
+            .into_response()
+        }
+        Err(error) if error.to_string().contains("not found") => {
+            json_error(StatusCode::NOT_FOUND, error)
         }
         Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error),
     }
@@ -1359,6 +1397,96 @@ fn listed_sessions(
     sessions.sort_by_key(|session| session.metadata.updated_at);
     sessions.reverse();
     Ok(sessions)
+}
+
+fn delete_session(state_dir: &std::path::Path, session_id: Uuid) -> Result<bool> {
+    ensure_session_dirs(state_dir)?;
+    let mut metadata = load_session_metadata(state_dir, session_id)?
+        .with_context(|| format!("session {} not found", session_id))?;
+    let socket_path = sessions_socket_path(state_dir, session_id);
+    let was_active = metadata.ended_at.is_none() && socket_path.exists();
+
+    let mut process_signaled = false;
+    if was_active {
+        if let Some(process_group_id) = metadata.process_group_id {
+            process_signaled = signal_process_group(process_group_id)?;
+            thread::sleep(Duration::from_millis(100));
+        }
+        remove_file_if_exists(&socket_path)?;
+    }
+
+    let now = Utc::now();
+    metadata.updated_at = now;
+    metadata.ended_at = Some(now);
+    metadata.process_group_id = None;
+    save_session_metadata(state_dir, &metadata)?;
+
+    Ok(process_signaled)
+}
+
+fn load_session_metadata(
+    state_dir: &std::path::Path,
+    session_id: Uuid,
+) -> Result<Option<SessionMetadata>> {
+    let path = sessions_dir(state_dir).join(format!("{}.json", session_id));
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(Some(serde_json::from_str(&content)?))
+}
+
+fn save_session_metadata(state_dir: &std::path::Path, metadata: &SessionMetadata) -> Result<()> {
+    let path = sessions_dir(state_dir).join(format!("{}.json", metadata.session_id));
+    let temp = with_temp_extension(&path);
+    std::fs::write(&temp, serde_json::to_vec_pretty(metadata)?)
+        .with_context(|| format!("failed to write {}", temp.display()))?;
+    std::fs::rename(&temp, &path).with_context(|| format!("failed to move {}", path.display()))?;
+    Ok(())
+}
+
+fn with_temp_extension(path: &std::path::Path) -> PathBuf {
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| format!("{ext}.tmp"))
+        .unwrap_or_else(|| "tmp".to_string());
+    path.with_extension(extension)
+}
+
+fn signal_process_group(process_group_id: i32) -> Result<bool> {
+    if process_group_id <= 0 {
+        bail!("invalid session process group id {}", process_group_id);
+    }
+    let output = Command::new("kill")
+        .arg("-TERM")
+        .arg("--")
+        .arg(format!("-{}", process_group_id))
+        .output()
+        .context("failed to signal session process group")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("No such process") {
+            return Ok(false);
+        }
+        bail!(
+            "failed to signal session process group {}: {}",
+            process_group_id,
+            stderr.trim()
+        );
+    }
+    Ok(true)
+}
+
+fn remove_file_if_exists(path: impl AsRef<std::path::Path>) -> Result<()> {
+    match fs::remove_file(path.as_ref()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to remove {}", path.as_ref().display()))
+        }
+    }
 }
 
 fn session_preview(
@@ -2806,6 +2934,39 @@ mod tests {
 
         assert!(!truncated);
         assert_eq!(preview, b"real motd\n");
+    }
+
+    #[test]
+    fn delete_session_marks_metadata_ended_and_removes_socket() {
+        let state_dir = std::env::temp_dir().join(format!("portal-hub-test-{}", Uuid::new_v4()));
+        ensure_session_dirs(&state_dir).unwrap();
+        let session_id = Uuid::new_v4();
+        let now = Utc::now();
+        let metadata = SessionMetadata {
+            schema_version: 1,
+            session_id,
+            session_name: format!("portal-{}", session_id),
+            target_host: "example.internal".to_string(),
+            target_port: 22,
+            target_user: "john".to_string(),
+            created_at: now,
+            updated_at: now,
+            ended_at: None,
+            process_group_id: None,
+        };
+        save_session_metadata(&state_dir, &metadata).unwrap();
+        std::fs::write(sessions_socket_path(&state_dir, session_id), b"").unwrap();
+
+        let signaled = delete_session(&state_dir, session_id).unwrap();
+        let metadata = load_session_metadata(&state_dir, session_id)
+            .unwrap()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&state_dir);
+
+        assert!(!signaled);
+        assert!(metadata.ended_at.is_some());
+        assert!(metadata.process_group_id.is_none());
+        assert!(!sessions_socket_path(&state_dir, session_id).exists());
     }
 
     #[test]

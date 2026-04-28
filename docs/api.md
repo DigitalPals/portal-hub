@@ -134,6 +134,7 @@ POST /api/vault/enrollments
 GET /api/vault/enrollments/{id}
 POST /api/vault/enrollments/{id}/approve
 GET /api/sessions
+DELETE /api/sessions/{id}
 GET /api/sessions/terminal
 ```
 
@@ -187,6 +188,12 @@ Hub stores only public keys, request status, and encrypted envelopes.
 `GET /api/sessions` requires a bearer token and returns the versioned session
 list used by Portal's active-session picker. `active=true`, `include_preview`,
 and `preview_bytes` are supported query parameters.
+
+`DELETE /api/sessions/{id}` requires a bearer token and ends an active Portal
+Hub session. Newer Hub sessions store a process group id so Hub can signal the
+underlying `dtach` session before removing the active socket and marking the
+session ended. Older sessions without that metadata are removed from active
+lists by socket and metadata update.
 
 `GET /api/sessions/terminal` upgrades to a bearer-authenticated WebSocket. The
 first client message is a JSON terminal start request with `session_id`,
