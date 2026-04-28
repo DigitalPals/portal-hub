@@ -24,7 +24,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::{SinkExt, StreamExt as FuturesStreamExt};
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{ChildKiller, CommandBuilder, PtySize, native_pty_system};
 use rand::RngCore;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -920,10 +920,22 @@ async fn handle_terminal_socket(state: AppState, socket: WebSocket) {
         tokio::select! {
             output = terminal.output_rx.recv() => {
                 let Some(output) = output else {
+                    let _ = ws_tx
+                        .send(WsMessage::Text(json!({"type": "closed"}).to_string()))
+                        .await;
                     let _ = ws_tx.send(WsMessage::Close(None)).await;
                     break;
                 };
                 if ws_tx.send(WsMessage::Binary(output)).await.is_err() {
+                    break;
+                }
+            }
+            child_exit = terminal.child_exit_rx.recv() => {
+                if child_exit.is_some() {
+                    let _ = ws_tx
+                        .send(WsMessage::Text(json!({"type": "closed"}).to_string()))
+                        .await;
+                    let _ = ws_tx.send(WsMessage::Close(None)).await;
                     break;
                 }
             }
@@ -966,14 +978,15 @@ async fn handle_terminal_socket(state: AppState, socket: WebSocket) {
         }
     }
 
-    let _ = terminal.child.kill();
+    let _ = terminal.child_killer.kill();
 }
 
 struct TerminalPty {
     master: Box<dyn portable_pty::MasterPty + Send>,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
+    child_killer: Box<dyn ChildKiller + Send + Sync>,
     writer: Box<dyn std::io::Write + Send>,
     output_rx: mpsc::Receiver<Vec<u8>>,
+    child_exit_rx: mpsc::Receiver<()>,
     identity_file: Option<PathBuf>,
 }
 
@@ -1009,6 +1022,7 @@ fn spawn_terminal_pty(state: &AppState, start: &WebTerminalStart) -> Result<Term
                 })?
         }
     };
+    let child_killer = child.clone_killer();
     drop(pair.slave);
 
     let mut reader = pair
@@ -1034,12 +1048,19 @@ fn spawn_terminal_pty(state: &AppState, start: &WebTerminalStart) -> Result<Term
             }
         }
     });
+    let (child_exit_tx, child_exit_rx) = mpsc::channel(1);
+    thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+        let _ = child_exit_tx.blocking_send(());
+    });
 
     Ok(TerminalPty {
         master: pair.master,
-        child,
+        child_killer,
         writer,
         output_rx,
+        child_exit_rx,
         identity_file,
     })
 }
