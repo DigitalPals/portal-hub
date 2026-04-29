@@ -2245,11 +2245,17 @@ fn broadcast_vault_enrollment(state: &AppState, user_id: &str, enrollment: &Vaul
 }
 
 fn vault_enrollment_event(enrollment: &VaultEnrollment) -> Result<Event, serde_json::Error> {
+    vault_enrollment_event_payload(enrollment)
+        .map(|data| Event::default().event("vault_enrollment").data(data))
+}
+
+fn vault_enrollment_event_payload(
+    enrollment: &VaultEnrollment,
+) -> Result<String, serde_json::Error> {
     serde_json::to_string(&json!({
         "type": "vault_enrollment",
         "enrollment": enrollment,
     }))
-    .map(|data| Event::default().event("vault_enrollment").data(data))
 }
 
 fn error_event(message: String) -> Event {
@@ -3366,6 +3372,72 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(loaded.status, "revoked");
+
+        let audit = list_vault_audit_events(&state, &user_id, 10).unwrap();
+        let audit_events = audit
+            .iter()
+            .map(|event| event.event.as_str())
+            .collect::<Vec<_>>();
+        assert!(audit_events.contains(&"vault_enrollment_create"));
+        assert!(audit_events.contains(&"vault_enrollment_approve"));
+        assert!(audit_events.contains(&"vault_enrollment_revoke"));
+    }
+
+    #[test]
+    fn android_pairing_sessions_are_single_use_and_expire() {
+        let state = test_state();
+        let pairing_id = create_android_pairing_session(&state).unwrap();
+
+        consume_android_pairing_session(&state, &pairing_id).unwrap();
+        assert!(
+            consume_android_pairing_session(&state, &pairing_id)
+                .unwrap_err()
+                .to_string()
+                .contains("already used")
+        );
+
+        let expired_id = create_android_pairing_session(&state).unwrap();
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE android_pairing_sessions SET expires_at = ?1 WHERE id = ?2",
+                params![
+                    (Utc::now() - ChronoDuration::minutes(1)).to_rfc3339(),
+                    expired_id
+                ],
+            )
+            .unwrap();
+        assert!(
+            consume_android_pairing_session(&state, &expired_id)
+                .unwrap_err()
+                .to_string()
+                .contains("expired")
+        );
+    }
+
+    #[test]
+    fn vault_enrollment_event_serializes_enrollment_payload() {
+        let enrollment = VaultEnrollment {
+            id: Uuid::new_v4().to_string(),
+            device_name: "Pixel".to_string(),
+            public_key_algorithm: "RSA-OAEP-SHA256".to_string(),
+            public_key_der_base64: BASE64_STANDARD.encode(b"public-key"),
+            status: "approved".to_string(),
+            encrypted_secret_base64: Some(BASE64_STANDARD.encode(b"secret")),
+            pairing_id: Some(Uuid::new_v4().to_string()),
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+            approved_at: Some(Utc::now().to_rfc3339()),
+            revoked_at: None,
+        };
+
+        let payload = vault_enrollment_event_payload(&enrollment).unwrap();
+
+        assert!(payload.contains("vault_enrollment"));
+        assert!(payload.contains(&enrollment.id));
+        assert!(payload.contains("\"status\":\"approved\""));
     }
 
     #[test]

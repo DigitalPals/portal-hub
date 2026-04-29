@@ -28,7 +28,8 @@ if [[ -d "${android_root}" ]]; then
       PORTAL_HUB_CONTRACT_DIR="${contract_dir}" \
         ./gradlew testOssDebugUnitTest \
           --tests org.connectbot.portal.PortalHubRepositoryTest \
-          --tests org.connectbot.portal.PortalHubContractTest
+          --tests org.connectbot.portal.PortalHubContractTest \
+          --rerun-tasks
     )
   elif command -v nix >/dev/null 2>&1 && [[ -f "${android_root}/flake.nix" ]]; then
     (
@@ -36,7 +37,8 @@ if [[ -d "${android_root}" ]]; then
       PORTAL_HUB_CONTRACT_DIR="${contract_dir}" \
         nix develop --command ./gradlew testOssDebugUnitTest \
           --tests org.connectbot.portal.PortalHubRepositoryTest \
-          --tests org.connectbot.portal.PortalHubContractTest
+          --tests org.connectbot.portal.PortalHubContractTest \
+          --rerun-tasks
     )
   else
     echo "Java is not on PATH and nix develop is unavailable for ${android_root}" >&2
