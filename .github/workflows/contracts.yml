@@ -1,0 +1,42 @@
+name: Contract compatibility
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  ecosystem-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Portal Hub
+        uses: actions/checkout@v4
+        with:
+          path: portal-hub
+
+      - name: Check out Portal desktop
+        uses: actions/checkout@v4
+        with:
+          repository: DigitalPals/portal
+          path: portal
+
+      - name: Check out Portal Android
+        uses: actions/checkout@v4
+        with:
+          repository: DigitalPals/portal-android
+          path: portal-android
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run ecosystem contract checks
+        run: ./portal-hub/scripts/check-ecosystem-contracts.sh
