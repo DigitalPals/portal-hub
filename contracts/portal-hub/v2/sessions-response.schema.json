@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://digitalpals.dev/portal-hub/contracts/v2/sessions-response.schema.json",
+  "title": "Portal Hub API v2 sessions response",
+  "type": "object",
+  "required": ["api_version", "generated_at", "sessions"],
+  "properties": {
+    "api_version": { "const": 2 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "sessions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "session_id",
+          "session_name",
+          "target_host",
+          "target_port",
+          "target_user",
+          "created_at",
+          "updated_at",
+          "ended_at",
+          "active"
+        ],
+        "properties": {
+          "schema_version": { "type": "integer", "minimum": 1 },
+          "session_id": { "type": "string", "format": "uuid" },
+          "session_name": { "type": "string", "minLength": 1 },
+          "target_host": { "type": "string", "minLength": 1 },
+          "target_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "target_user": { "type": "string", "minLength": 1 },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "ended_at": {
+            "anyOf": [
+              { "type": "string", "format": "date-time" },
+              { "type": "null" }
+            ]
+          },
+          "process_group_id": { "type": "integer" },
+          "process_id": { "type": "integer" },
+          "active": { "type": "boolean" },
+          "last_output_at": { "type": "string", "format": "date-time" },
+          "preview_base64": { "type": "string" },
+          "preview_truncated": { "type": "boolean" }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

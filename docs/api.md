@@ -4,6 +4,22 @@ Portal Hub exposes OAuth-authenticated web APIs for Portal desktop. The legacy
 SSH forced-command CLI remains available for deployments and compatibility.
 Clients should request versioned JSON responses and reject unknown API versions.
 
+## Contract Schemas
+
+The canonical Portal Hub API v2 wire contract lives in
+`contracts/portal-hub/v2`. It includes JSON Schemas for `/api/info`,
+sync v2, session lists/deletes, terminal WebSocket control messages, sync SSE
+events, and vault enrollment requests/responses.
+
+Compatibility policy:
+
+- Clients must reject unsupported `api_version` values.
+- Clients should tolerate additive fields in responses for a supported API
+  version.
+- Hub must increment `api_version` for breaking response or request changes.
+- Request schemas are stricter than response schemas so unsupported client
+  payloads fail early.
+
 ## Version
 
 ```sh

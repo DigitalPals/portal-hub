@@ -33,3 +33,4 @@ urlencoding = "2.1"
 uuid = { version = "1.10", features = ["v4", "serde"] }
 
 [dev-dependencies]
+jsonschema = { version = "0.46.3", default-features = false }

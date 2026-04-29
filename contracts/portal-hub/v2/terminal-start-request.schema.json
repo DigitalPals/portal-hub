@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://digitalpals.dev/portal-hub/contracts/v2/terminal-start-request.schema.json",
+  "title": "Portal Hub API v2 terminal WebSocket start request",
+  "type": "object",
+  "required": ["session_id", "target_host", "target_port", "target_user", "cols", "rows"],
+  "properties": {
+    "session_id": { "type": "string", "format": "uuid" },
+    "target_host": { "type": "string", "minLength": 1 },
+    "target_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "target_user": { "type": "string", "minLength": 1 },
+    "cols": { "type": "integer", "minimum": 1, "maximum": 1000 },
+    "rows": { "type": "integer", "minimum": 1, "maximum": 1000 },
+    "private_key": { "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": false
+}

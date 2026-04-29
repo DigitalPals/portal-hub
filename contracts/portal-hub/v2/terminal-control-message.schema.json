@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://digitalpals.dev/portal-hub/contracts/v2/terminal-control-message.schema.json",
+  "title": "Portal Hub API v2 terminal WebSocket control message",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["type", "session_id"],
+      "properties": {
+        "type": { "const": "started" },
+        "session_id": { "type": "string", "format": "uuid" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "closed" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "required": ["type", "message"],
+      "properties": {
+        "type": { "const": "error" },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "required": ["type", "cols", "rows"],
+      "properties": {
+        "type": { "const": "resize" },
+        "cols": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "rows": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

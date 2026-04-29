@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://digitalpals.dev/portal-hub/contracts/v2/sync-v2-put-request.schema.json",
+  "title": "Portal Hub API v2 sync put request",
+  "type": "object",
+  "required": ["services"],
+  "properties": {
+    "services": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "enum": ["hosts", "settings", "snippets", "vault"]
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["expected_revision", "payload"],
+        "properties": {
+          "expected_revision": { "type": "string", "minLength": 1 },
+          "payload": {},
+          "tombstones": {
+            "anyOf": [
+              { "type": "array", "items": { "type": "string" } },
+              { "type": "object" }
+            ],
+            "default": []
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

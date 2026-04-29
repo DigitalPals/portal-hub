@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://digitalpals.dev/portal-hub/contracts/v2/api-info-response.schema.json",
+  "title": "Portal Hub API v2 info response",
+  "type": "object",
+  "required": ["api_version", "version", "public_url", "capabilities", "ssh_port", "ssh_username"],
+  "properties": {
+    "api_version": { "const": 2 },
+    "version": { "type": "string", "minLength": 1 },
+    "public_url": { "type": "string", "minLength": 1 },
+    "capabilities": {
+      "type": "object",
+      "required": ["sync_v2", "sync_events", "web_proxy", "key_vault", "vault_enrollment"],
+      "properties": {
+        "sync_v2": { "type": "boolean" },
+        "sync_events": { "type": "boolean" },
+        "web_proxy": { "type": "boolean" },
+        "key_vault": { "type": "boolean" },
+        "vault_enrollment": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "ssh_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "ssh_username": { "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": true
+}

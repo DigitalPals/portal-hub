@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://digitalpals.dev/portal-hub/contracts/v2/vault-enrollment-list-response.schema.json",
+  "title": "Portal Hub API v2 vault enrollment list response",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": [
+      "id",
+      "device_name",
+      "public_key_algorithm",
+      "public_key_der_base64",
+      "status",
+      "encrypted_secret_base64",
+      "created_at",
+      "updated_at",
+      "approved_at"
+    ],
+    "properties": {
+      "id": { "type": "string", "format": "uuid" },
+      "device_name": { "type": "string", "minLength": 1 },
+      "public_key_algorithm": { "const": "RSA-OAEP-SHA256" },
+      "public_key_der_base64": { "type": "string", "minLength": 1 },
+      "status": { "enum": ["pending", "approved", "rejected", "expired"] },
+      "encrypted_secret_base64": {
+        "anyOf": [
+          { "type": "string" },
+          { "type": "null" }
+        ]
+      },
+      "created_at": { "type": "string", "format": "date-time" },
+      "updated_at": { "type": "string", "format": "date-time" },
+      "approved_at": {
+        "anyOf": [
+          { "type": "string", "format": "date-time" },
+          { "type": "null" }
+        ]
+      }
+    },
+    "additionalProperties": true
+  }
+}

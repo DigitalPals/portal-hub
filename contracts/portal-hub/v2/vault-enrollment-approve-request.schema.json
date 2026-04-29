@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://digitalpals.dev/portal-hub/contracts/v2/vault-enrollment-approve-request.schema.json",
+  "title": "Portal Hub API v2 vault enrollment approve request",
+  "type": "object",
+  "required": ["encrypted_secret_base64"],
+  "properties": {
+    "encrypted_secret_base64": { "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": false
+}

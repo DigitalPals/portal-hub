@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://digitalpals.dev/portal-hub/contracts/v2/sync-event.schema.json",
+  "title": "Portal Hub API v2 sync SSE event data",
+  "type": "object",
+  "required": ["api_version", "generated_at", "services"],
+  "properties": {
+    "api_version": { "const": 2 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "services": {
+      "type": "object",
+      "propertyNames": {
+        "enum": ["hosts", "settings", "snippets", "vault"]
+      },
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    }
+  },
+  "additionalProperties": true
+}
