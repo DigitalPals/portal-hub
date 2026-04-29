@@ -38,7 +38,8 @@ fn schema(name: &str) -> Value {
         }
         _ => panic!("unknown schema {name}"),
     };
-    serde_json::from_str(raw).unwrap_or_else(|error| panic!("{name} schema is invalid JSON: {error}"))
+    serde_json::from_str(raw)
+        .unwrap_or_else(|error| panic!("{name} schema is invalid JSON: {error}"))
 }
 
 fn assert_valid(name: &str, instance: Value) {

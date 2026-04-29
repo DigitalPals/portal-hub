@@ -27,6 +27,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::{SinkExt, StreamExt as FuturesStreamExt};
 use portable_pty::{ChildKiller, CommandBuilder, PtySize, native_pty_system};
+use qrcode::{QrCode, render::svg};
 use rand::RngCore;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -291,6 +292,7 @@ async fn run_async(
     let app = Router::new()
         .route("/", get(root))
         .route("/admin", get(admin_page))
+        .route("/pair/android", get(android_pairing_page))
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
         .route("/oauth/authorize", get(authorize_page))
@@ -404,8 +406,10 @@ async fn root(State(state): State<AppState>) -> Response {
                     <p class="eyebrow">Hub online</p>
                     <h1>Portal Hub is running.</h1>
                     <p class="lead">Desktop clients can authenticate and sync through <code>{}</code>.</p>
+                    {}
                   </section>"#,
-                html_escape(&state.public_url)
+                html_escape(&state.public_url),
+                android_pairing_panel(&state.public_url)
             ),
         ))
         .into_response()
@@ -450,8 +454,10 @@ async fn admin_page(
                 <h1>Portal Hub is ready.</h1>
                 <p class="lead">Continue through Portal desktop sign-in to authenticate with your password.</p>
                 {}
+                {}
               </section>"#,
-                continue_button_html(&continue_url)
+                continue_button_html(&continue_url),
+                android_pairing_panel(&state.public_url)
             ),
         ))
         .into_response();
@@ -496,6 +502,22 @@ async fn admin_page(
             </form>
           </section>"#,
             html_escape(&continue_url)
+        ),
+    ))
+    .into_response()
+}
+
+async fn android_pairing_page(State(state): State<AppState>) -> Response {
+    Html(page(
+        "Pair Portal Android",
+        &format!(
+            r#"<section class="panel">
+                <p class="eyebrow">Android pairing</p>
+                <h1>Pair Portal Android.</h1>
+                <p class="lead">Scan this QR code on Android to select this Hub, sign in, and request vault access automatically.</p>
+                {}
+              </section>"#,
+            android_pairing_panel(&state.public_url)
         ),
     ))
     .into_response()
@@ -2233,6 +2255,39 @@ fn continue_button_html(continue_url: &str) -> String {
     )
 }
 
+fn android_pairing_link(public_url: &str) -> String {
+    format!(
+        "com.digitalpals.portal.android:/pair?hub_url={}",
+        urlencoding::encode(public_url)
+    )
+}
+
+fn android_pairing_panel(public_url: &str) -> String {
+    let link = android_pairing_link(public_url);
+    let qr_svg = QrCode::new(link.as_bytes())
+        .map(|code| {
+            code.render::<svg::Color<'_>>()
+                .min_dimensions(224, 224)
+                .quiet_zone(true)
+                .build()
+        })
+        .unwrap_or_else(|_| String::new());
+    format!(
+        r#"<div class="pairing-panel">
+            <div class="qr-code" aria-label="Portal Android pairing QR code">{}</div>
+            <div class="pairing-copy">
+              <strong>Portal Android</strong>
+              <p>Open this on your Android device. After sign-in, Portal Android creates a vault access request and waits for desktop approval.</p>
+              <a class="button-link compact" href="{}">Open Portal Android</a>
+              <code>{}</code>
+            </div>
+          </div>"#,
+        qr_svg,
+        html_escape(&link),
+        html_escape(&link)
+    )
+}
+
 fn validate_username(username: &str) -> Result<()> {
     let username = username.trim();
     if username.len() < 2 || username.len() > 64 {
@@ -2560,6 +2615,51 @@ fn page(title: &str, body: &str) -> String {
               text-decoration: none;
             }}
             .button-link:hover {{ filter: brightness(1.04); }}
+            .button-link.compact {{
+              min-height: 42px;
+              margin-top: 14px;
+              font-size: 14px;
+            }}
+            .pairing-panel {{
+              display: grid;
+              grid-template-columns: 224px minmax(0, 1fr);
+              gap: 18px;
+              align-items: start;
+              margin-top: 26px;
+              padding: 16px;
+              border: 1px solid var(--line);
+              border-radius: 8px;
+              background: var(--surface-2);
+            }}
+            .qr-code {{
+              display: grid;
+              place-items: center;
+              width: 224px;
+              height: 224px;
+              border-radius: 7px;
+              background: #ffffff;
+              overflow: hidden;
+            }}
+            .qr-code svg {{
+              display: block;
+              width: 224px;
+              height: 224px;
+            }}
+            .pairing-copy strong {{
+              display: block;
+              color: var(--text);
+              margin-bottom: 8px;
+            }}
+            .pairing-copy p {{
+              margin: 0;
+              color: var(--muted);
+              line-height: 1.5;
+            }}
+            .pairing-copy code {{
+              display: block;
+              margin-top: 14px;
+              font-size: 12px;
+            }}
             .actions {{
               display: grid;
               grid-template-columns: 1fr 1fr;
@@ -2661,6 +2761,8 @@ fn page(title: &str, body: &str) -> String {
               }}
               .brand-copy {{ margin-top: 20px; }}
               .panel {{ padding: 24px; }}
+              .pairing-panel {{ grid-template-columns: 1fr; }}
+              .qr-code {{ margin: 0 auto; }}
             }}
             @media (max-width: 480px) {{
               main {{ width: min(100vw - 24px, 1120px); }}
@@ -2891,6 +2993,16 @@ mod tests {
         query.redirect_uri = format!("{ANDROID_REDIRECT_SCHEME}:{ANDROID_REDIRECT_PATH}");
 
         validate_authorize_query(&query).unwrap();
+    }
+
+    #[test]
+    fn android_pairing_link_encodes_hub_url() {
+        let link = android_pairing_link("https://portal-hub.example.ts.net:8080");
+
+        assert_eq!(
+            link,
+            "com.digitalpals.portal.android:/pair?hub_url=https%3A%2F%2Fportal-hub.example.ts.net%3A8080"
+        );
     }
 
     #[test]
