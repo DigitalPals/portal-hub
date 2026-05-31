@@ -49,6 +49,7 @@ const ACCESS_TOKEN_TTL_HOURS: i64 = 24;
 const REFRESH_TOKEN_TTL_DAYS: i64 = 90;
 const AUTH_CODE_TTL_MINUTES: i64 = 5;
 const MIN_PASSWORD_LEN: usize = 12;
+const MAX_WEB_SESSION_PREVIEW_BYTES: u64 = 64 * 1024;
 
 const PORTAL_ASCII_LOGO: &str = r#"                                  .             oooo
                                 .o8             `888
@@ -233,6 +234,8 @@ struct WebTerminalStart {
     target_user: String,
     cols: u16,
     rows: u16,
+    #[serde(default)]
+    replay_bytes: Option<u64>,
     #[serde(default)]
     private_key: Option<String>,
 }
@@ -1199,6 +1202,8 @@ fn spawn_attach_command(
     command.arg(start.cols.to_string());
     command.arg("--rows");
     command.arg(start.rows.to_string());
+    command.arg("--replay-bytes");
+    command.arg(start.replay_bytes.unwrap_or(0).to_string());
     command.arg("--interactive-auth");
     if let Some(identity_file) = identity_file {
         command.arg("--identity-file");
@@ -1668,7 +1673,7 @@ fn session_preview(
     let metadata = std::fs::metadata(&path)?;
     let modified = metadata.modified().ok().map(DateTime::<Utc>::from);
     let len = metadata.len();
-    let take = preview_bytes.min(len);
+    let take = preview_bytes.min(MAX_WEB_SESSION_PREVIEW_BYTES).min(len);
     let mut file = std::fs::File::open(&path)?;
     use std::io::Seek;
     if len > take {
@@ -3511,6 +3516,26 @@ mod tests {
 
         assert!(!truncated);
         assert_eq!(preview, b"real motd\n");
+    }
+
+    #[test]
+    fn session_preview_caps_requested_bytes() {
+        let state_dir = std::env::temp_dir().join(format!("portal-hub-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(logs_dir(&state_dir)).unwrap();
+        let session_id = Uuid::new_v4();
+        std::fs::write(
+            logs_dir(&state_dir).join(format!("{}.typescript", session_id)),
+            vec![b'x'; (MAX_WEB_SESSION_PREVIEW_BYTES + 1) as usize],
+        )
+        .unwrap();
+
+        let (preview_base64, truncated, _) =
+            session_preview(&state_dir, session_id, MAX_WEB_SESSION_PREVIEW_BYTES * 8).unwrap();
+        let preview = BASE64_STANDARD.decode(preview_base64.unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&state_dir);
+
+        assert!(truncated);
+        assert_eq!(preview.len(), MAX_WEB_SESSION_PREVIEW_BYTES as usize);
     }
 
     #[test]

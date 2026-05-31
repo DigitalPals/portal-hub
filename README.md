@@ -32,7 +32,8 @@ Portal signs in to the Hub web service with OAuth + PKCE. For persistent
 terminal sessions, Portal opens an authenticated WebSocket and asks Hub to start
 or attach to a target SSH session. Hub runs that target session inside `dtach`,
 records a bounded replay log with `script`, and reconnects Portal to the same
-session later.
+session later. Web clients can resume without replaying stored output, while
+the replay log remains available for thumbnails and explicit history features.
 
 Typing `exit` in the remote shell ends the real target session. Closing Portal,
 losing Wi-Fi, or moving to another machine only detaches the Portal client.

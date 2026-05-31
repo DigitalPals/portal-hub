@@ -119,6 +119,8 @@ enum CommandKind {
         identity_file: Option<PathBuf>,
         #[arg(long, hide = true)]
         interactive_auth: bool,
+        #[arg(long, hide = true, default_value_t = MAX_REPLAY_BYTES)]
+        replay_bytes: u64,
     },
     /// Synchronize Portal hosts, settings, snippets, and encrypted vault blobs.
     Sync {
@@ -347,6 +349,7 @@ fn main() -> Result<()> {
             rows,
             identity_file,
             interactive_auth,
+            replay_bytes,
         } => attach_session(
             &state,
             AttachRequest {
@@ -361,6 +364,7 @@ fn main() -> Result<()> {
                 allowed_targets,
                 identity_file,
                 batch_mode: !interactive_auth,
+                replay_bytes,
             },
         ),
         CommandKind::Sync { command } => sync_command(&state, command),
@@ -418,6 +422,7 @@ fn run_forced_command(state: &State) -> Result<()> {
             rows,
             identity_file,
             interactive_auth,
+            replay_bytes,
         }) => attach_session(
             state,
             AttachRequest {
@@ -432,6 +437,7 @@ fn run_forced_command(state: &State) -> Result<()> {
                 allowed_targets: configured_allowed_targets(),
                 identity_file,
                 batch_mode: !interactive_auth,
+                replay_bytes,
             },
         ),
         Some(CommandKind::Sync { command }) => sync_command(state, command),
@@ -630,6 +636,7 @@ struct AttachRequest {
     allowed_targets: Vec<String>,
     identity_file: Option<PathBuf>,
     batch_mode: bool,
+    replay_bytes: u64,
 }
 
 fn attach_session(state: &State, request: AttachRequest) -> Result<()> {
@@ -645,6 +652,7 @@ fn attach_session(state: &State, request: AttachRequest) -> Result<()> {
         allowed_targets,
         identity_file,
         batch_mode,
+        replay_bytes,
     } = request;
 
     validate_target(&target_host, target_port, &target_user)?;
@@ -734,9 +742,9 @@ fn attach_session(state: &State, request: AttachRequest) -> Result<()> {
     metadata.updated_at = Utc::now();
     state.save_session(&metadata)?;
 
-    if logging_mode == LoggingMode::Full && should_replay {
+    if logging_mode == LoggingMode::Full && should_replay && replay_bytes > 0 {
         thread::sleep(Duration::from_millis(75));
-        replay_log_tail(&log_path, MAX_REPLAY_BYTES)?;
+        replay_log_tail(&log_path, replay_bytes.min(MAX_REPLAY_BYTES))?;
     }
 
     let status = child.wait().context("failed to wait for dtach")?;
@@ -1694,6 +1702,44 @@ mod tests {
         assert_eq!(shell_quote("simple-value"), "simple-value");
         assert_eq!(shell_quote("two words"), "'two words'");
         assert_eq!(shell_quote("john's host"), "'john'\\''s host'");
+    }
+
+    #[test]
+    fn attach_cli_defaults_to_full_replay_and_accepts_zero_replay() {
+        let session_id = Uuid::new_v4();
+        let default_cli = Cli::try_parse_from([
+            "portal-hub",
+            "attach",
+            "--session-id",
+            &session_id.to_string(),
+            "--target-host",
+            "example.internal",
+            "--target-user",
+            "john",
+        ])
+        .unwrap();
+        let CommandKind::Attach { replay_bytes, .. } = default_cli.command.unwrap() else {
+            panic!("expected attach command");
+        };
+        assert_eq!(replay_bytes, MAX_REPLAY_BYTES);
+
+        let no_replay_cli = Cli::try_parse_from([
+            "portal-hub",
+            "attach",
+            "--session-id",
+            &session_id.to_string(),
+            "--target-host",
+            "example.internal",
+            "--target-user",
+            "john",
+            "--replay-bytes",
+            "0",
+        ])
+        .unwrap();
+        let CommandKind::Attach { replay_bytes, .. } = no_replay_cli.command.unwrap() else {
+            panic!("expected attach command");
+        };
+        assert_eq!(replay_bytes, 0);
     }
 
     #[test]

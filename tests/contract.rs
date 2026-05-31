@@ -208,6 +208,7 @@ fn terminal_websocket_contracts_cover_client_and_server_messages() {
             "target_user": "john",
             "cols": 120,
             "rows": 30,
+            "replay_bytes": 0,
             "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n"
         }),
     );

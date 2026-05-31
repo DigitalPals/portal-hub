@@ -204,6 +204,8 @@ Hub stores only public keys, request status, and encrypted envelopes.
 `GET /api/sessions` requires a bearer token and returns the versioned session
 list used by Portal's active-session picker. `active=true`, `include_preview`,
 and `preview_bytes` are supported query parameters.
+Web session previews are capped at 64 KiB before base64 encoding so large
+terminal logs do not block session pickers.
 
 `DELETE /api/sessions/{id}` requires a bearer token and ends an active Portal
 Hub session. Newer Hub sessions store a process group id so Hub can signal the
@@ -214,7 +216,9 @@ lists by socket and metadata update.
 `GET /api/sessions/terminal` upgrades to a bearer-authenticated WebSocket. The
 first client message is a JSON terminal start request with `session_id`,
 `target_host`, `target_port`, `target_user`, `cols`, `rows`, and optional
-`private_key`. Hub replies with `{"type":"started"}` or `{"type":"error"}`.
+`replay_bytes` and `private_key`. `replay_bytes` controls how many bytes of
+stored log output Hub writes before attaching to an existing live session; it
+defaults to `0` so web clients resume without replay. Hub replies with `{"type":"started"}` or `{"type":"error"}`.
 Binary WebSocket messages carry terminal input and output. Resize control
 messages use `{"type":"resize","cols":120,"rows":30}`.
 

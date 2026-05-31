@@ -40,11 +40,13 @@ fn attach_detach_reconnect_replay_and_exit() {
     let mut first = spawn_attach(&fixture, &state_dir.path, &home_dir.path, &session_id);
     first
         .stdin
-        .write_all(b"echo PROXY_FIRST; sleep 30\n")
+        .write_all(
+            b"printf PROXY_; printf FIRST_REPLAY_ONLY; printf '\\n'; clear; printf PROXY_; printf CURRENT_SCREEN; printf '\\n'; sleep 30\n",
+        )
         .unwrap();
     first
         .reader
-        .wait_for_occurrences(b"PROXY_FIRST", 2, Duration::from_secs(10));
+        .wait_for(b"PROXY_CURRENT_SCREEN", Duration::from_secs(10));
     first.stdin.write_all(&[0x1c]).unwrap();
     wait_for_attach_exit(first, Duration::from_secs(10));
 
@@ -54,7 +56,23 @@ fn attach_detach_reconnect_replay_and_exit() {
     let mut second = spawn_attach(&fixture, &state_dir.path, &home_dir.path, &session_id);
     second
         .reader
-        .wait_for(b"PROXY_FIRST", Duration::from_secs(10));
+        .wait_for(b"PROXY_FIRST_REPLAY_ONLY", Duration::from_secs(10));
+    second.stdin.write_all(&[0x1c]).unwrap();
+    wait_for_attach_exit(second, Duration::from_secs(10));
+
+    let active = list_active_sessions(&state_dir.path);
+    assert_eq!(active, 1);
+
+    let mut second = spawn_attach_with_replay(
+        &fixture,
+        &state_dir.path,
+        &home_dir.path,
+        &session_id,
+        Some(0),
+    );
+    second
+        .reader
+        .assert_not_seen(b"PROXY_FIRST_REPLAY_ONLY", Duration::from_millis(500));
     second.stdin.write_all(&[0x03]).unwrap();
     second
         .stdin
@@ -82,6 +100,16 @@ fn spawn_attach(
     home_dir: &Path,
     session_id: &str,
 ) -> AttachProcess {
+    spawn_attach_with_replay(fixture, state_dir, home_dir, session_id, None)
+}
+
+fn spawn_attach_with_replay(
+    fixture: &SshFixture,
+    state_dir: &Path,
+    home_dir: &Path,
+    session_id: &str,
+    replay_bytes: Option<u64>,
+) -> AttachProcess {
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -91,7 +119,7 @@ fn spawn_attach(
             pixel_height: 0,
         })
         .expect("open attach pty");
-    let argv = vec![
+    let mut argv = vec![
         portal_hub().into(),
         "--state-dir".into(),
         state_dir.as_os_str().to_os_string(),
@@ -111,6 +139,10 @@ fn spawn_attach(
         "--rows".into(),
         "24".into(),
     ];
+    if let Some(replay_bytes) = replay_bytes {
+        argv.push("--replay-bytes".into());
+        argv.push(replay_bytes.to_string().into());
+    }
     let mut command = CommandBuilder::from_argv(argv);
     command.env("HOME", home_dir);
     command.env("SSH_AUTH_SOCK", &fixture.agent_sock);
@@ -198,6 +230,24 @@ impl OutputReader {
             String::from_utf8_lossy(needle),
             String::from_utf8_lossy(&self.buffer)
         );
+    }
+
+    fn assert_not_seen(&mut self, needle: &[u8], duration: Duration) {
+        let start = Instant::now();
+        while start.elapsed() < duration {
+            if let Ok(bytes) = self.rx.recv_timeout(Duration::from_millis(50)) {
+                self.buffer.extend(bytes);
+            }
+            assert!(
+                !self
+                    .buffer
+                    .windows(needle.len())
+                    .any(|window| window == needle),
+                "unexpected replay of {:?}; output was:\n{}",
+                String::from_utf8_lossy(needle),
+                String::from_utf8_lossy(&self.buffer)
+            );
+        }
     }
 }
 
