@@ -26,7 +26,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::{SinkExt, StreamExt as FuturesStreamExt};
-use portable_pty::{ChildKiller, CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{ChildKiller, PtySize, native_pty_system};
 use qrcode::{QrCode, render::svg};
 use rand::RngCore;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -50,6 +50,8 @@ const REFRESH_TOKEN_TTL_DAYS: i64 = 90;
 const AUTH_CODE_TTL_MINUTES: i64 = 5;
 const MIN_PASSWORD_LEN: usize = 12;
 const MAX_WEB_SESSION_PREVIEW_BYTES: u64 = 64 * 1024;
+const WEB_TERMINAL_OUTPUT_COALESCE_DELAY: Duration = Duration::from_millis(4);
+const WEB_TERMINAL_OUTPUT_FRAME_TARGET_BYTES: usize = 64 * 1024;
 
 const PORTAL_ASCII_LOGO: &str = r#"                                  .             oooo
                                 .o8             `888
@@ -1038,6 +1040,7 @@ async fn handle_terminal_socket(state: AppState, socket: WebSocket) {
                     let _ = ws_tx.send(WsMessage::Close(None)).await;
                     break;
                 };
+                let output = coalesce_terminal_output(&mut terminal.output_rx, output).await;
                 if ws_tx.send(WsMessage::Binary(output)).await.is_err() {
                     break;
                 }
@@ -1057,7 +1060,11 @@ async fn handle_terminal_socket(state: AppState, socket: WebSocket) {
                 };
                 match message {
                     Ok(WsMessage::Binary(data)) => {
-                        if let Err(error) = terminal.writer.write_all(&data) {
+                        if let Err(error) = terminal
+                            .writer
+                            .write_all(&data)
+                            .and_then(|_| terminal.writer.flush())
+                        {
                             let _ = ws_tx
                                 .send(WsMessage::Text(
                                     json!({"type": "error", "message": format!("terminal write failed: {}", error)})
@@ -1093,6 +1100,47 @@ async fn handle_terminal_socket(state: AppState, socket: WebSocket) {
     let _ = terminal.child_killer.kill();
 }
 
+async fn coalesce_terminal_output(
+    output_rx: &mut mpsc::Receiver<Vec<u8>>,
+    mut output: Vec<u8>,
+) -> Vec<u8> {
+    drain_ready_terminal_output(output_rx, &mut output);
+    if output.len() >= WEB_TERMINAL_OUTPUT_FRAME_TARGET_BYTES {
+        return output;
+    }
+
+    let delay = tokio::time::sleep(WEB_TERMINAL_OUTPUT_COALESCE_DELAY);
+    tokio::pin!(delay);
+
+    loop {
+        tokio::select! {
+            _ = &mut delay => break,
+            next = output_rx.recv() => {
+                let Some(next) = next else {
+                    break;
+                };
+                output.extend_from_slice(&next);
+                if output.len() >= WEB_TERMINAL_OUTPUT_FRAME_TARGET_BYTES {
+                    break;
+                }
+            }
+        }
+    }
+
+    output
+}
+
+fn drain_ready_terminal_output(output_rx: &mut mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) {
+    while output.len() < WEB_TERMINAL_OUTPUT_FRAME_TARGET_BYTES {
+        match output_rx.try_recv() {
+            Ok(next) => output.extend_from_slice(&next),
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                break;
+            }
+        }
+    }
+}
+
 struct TerminalPty {
     master: Box<dyn portable_pty::MasterPty + Send>,
     child_killer: Box<dyn ChildKiller + Send + Sync>,
@@ -1114,14 +1162,33 @@ fn spawn_terminal_pty(state: &AppState, start: &WebTerminalStart) -> Result<Term
         .context("failed to open terminal pty")?;
 
     let identity_file = write_web_identity_file(state, start.private_key.as_deref())?;
-    let child = match spawn_attach_command(&*pair.slave, state, start, identity_file.as_ref(), true)
-    {
+    let hub_state = super::State::new(state.state_dir.clone());
+    let attach_request = super::AttachRequest {
+        session_id: start.session_id,
+        target_host: start.target_host.clone(),
+        target_port: start.target_port,
+        target_user: start.target_user.clone(),
+        cols: start.cols,
+        rows: start.rows,
+        max_log_bytes: super::configured_max_log_bytes(),
+        logging_mode: super::configured_logging_mode(),
+        allowed_targets: super::configured_allowed_targets(),
+        identity_file: identity_file.clone(),
+        batch_mode: false,
+        replay_bytes: start.replay_bytes.unwrap_or(0),
+    };
+    let prepared = super::prepare_attach_session(&hub_state, attach_request).inspect_err(|_| {
+        if let Some(path) = &identity_file {
+            let _ = fs::remove_file(path);
+        }
+    })?;
+    let child = match spawn_prepared_attach_command(&*pair.slave, &prepared, true) {
         Ok(child) => child,
         Err(primary_error) => {
             eprintln!(
                 "Portal Hub terminal controlling-tty spawn failed: {primary_error:#}; retrying without controlling tty"
             );
-            spawn_attach_command(&*pair.slave, state, start, identity_file.as_ref(), false)
+            spawn_prepared_attach_command(&*pair.slave, &prepared, false)
                 .inspect_err(|_| {
                     if let Some(path) = &identity_file {
                         let _ = fs::remove_file(path);
@@ -1134,6 +1201,11 @@ fn spawn_terminal_pty(state: &AppState, start: &WebTerminalStart) -> Result<Term
                 })?
         }
     };
+    let mut prepared = prepared;
+    prepared.record_process_id(
+        &hub_state,
+        child.process_id().and_then(|id| i32::try_from(id).ok()),
+    )?;
     let child_killer = child.clone_killer();
     drop(pair.slave);
 
@@ -1146,6 +1218,7 @@ fn spawn_terminal_pty(state: &AppState, start: &WebTerminalStart) -> Result<Term
         .take_writer()
         .context("failed to write terminal pty")?;
     let (output_tx, output_rx) = mpsc::channel(256);
+    queue_replay_output(&prepared, &output_tx)?;
     thread::spawn(move || {
         let mut buffer = [0u8; 8192];
         loop {
@@ -1163,7 +1236,18 @@ fn spawn_terminal_pty(state: &AppState, start: &WebTerminalStart) -> Result<Term
     let (child_exit_tx, child_exit_rx) = mpsc::channel(1);
     thread::spawn(move || {
         let mut child = child;
-        let _ = child.wait();
+        match child.wait() {
+            Ok(status) => {
+                if let Err(error) =
+                    super::finish_attach_session(&hub_state, prepared, status.success())
+                {
+                    eprintln!("Portal Hub terminal session finalization failed: {error:#}");
+                }
+            }
+            Err(error) => {
+                eprintln!("Portal Hub terminal session wait failed: {error}");
+            }
+        }
         let _ = child_exit_tx.blocking_send(());
     });
 
@@ -1177,82 +1261,45 @@ fn spawn_terminal_pty(state: &AppState, start: &WebTerminalStart) -> Result<Term
     })
 }
 
-fn spawn_attach_command(
-    slave: &dyn portable_pty::SlavePty,
-    state: &AppState,
-    start: &WebTerminalStart,
-    identity_file: Option<&PathBuf>,
-    controlling_tty: bool,
-) -> Result<Box<dyn portable_pty::Child + Send + Sync>> {
-    let mut command =
-        CommandBuilder::new(portal_hub_executable().context("failed to resolve executable")?);
-    command.set_controlling_tty(controlling_tty);
-    command.arg("--state-dir");
-    command.arg(state.state_dir.to_string_lossy().to_string());
-    command.arg("attach");
-    command.arg("--session-id");
-    command.arg(start.session_id.to_string());
-    command.arg("--target-host");
-    command.arg(start.target_host.clone());
-    command.arg("--target-port");
-    command.arg(start.target_port.to_string());
-    command.arg("--target-user");
-    command.arg(start.target_user.clone());
-    command.arg("--cols");
-    command.arg(start.cols.to_string());
-    command.arg("--rows");
-    command.arg(start.rows.to_string());
-    command.arg("--replay-bytes");
-    command.arg(start.replay_bytes.unwrap_or(0).to_string());
-    command.arg("--interactive-auth");
-    if let Some(identity_file) = identity_file {
-        command.arg("--identity-file");
-        command.arg(identity_file.to_string_lossy().to_string());
+fn queue_replay_output(
+    prepared: &super::PreparedAttach,
+    output_tx: &mpsc::Sender<Vec<u8>>,
+) -> Result<()> {
+    if prepared.logging_mode != super::LoggingMode::Full
+        || !prepared.should_replay
+        || prepared.replay_bytes == 0
+    {
+        return Ok(());
     }
 
-    slave
-        .spawn_command(command)
-        .context("failed to start Portal Hub terminal session")
+    thread::sleep(Duration::from_millis(75));
+    let Some((replay, truncated)) = super::read_log_tail(
+        &prepared.log_path,
+        prepared.replay_bytes.min(super::MAX_REPLAY_BYTES),
+    )?
+    else {
+        return Ok(());
+    };
+
+    if truncated
+        && output_tx
+            .blocking_send(b"\r\n[Portal Hub replay truncated]\r\n".to_vec())
+            .is_err()
+    {
+        return Ok(());
+    }
+    let _ = output_tx.blocking_send(replay);
+    Ok(())
 }
 
-fn portal_hub_executable() -> Result<PathBuf> {
-    let current =
-        std::env::current_exe().context("failed to resolve current portal-hub executable")?;
-    if current.exists() {
-        return Ok(current);
-    }
-
-    if let Some(path) = current
-        .to_string_lossy()
-        .strip_suffix(" (deleted)")
-        .map(PathBuf::from)
-    {
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-
-    if let Some(argv0) = std::env::args_os().next() {
-        let path = PathBuf::from(argv0);
-        if path.is_absolute() && path.exists() {
-            return Ok(path);
-        }
-        if path.components().count() > 1 {
-            let absolute = std::env::current_dir()
-                .context("failed to resolve current directory")?
-                .join(&path);
-            if absolute.exists() {
-                return Ok(absolute);
-            }
-        }
-    }
-
-    let installed = PathBuf::from("/usr/local/bin/portal-hub");
-    if installed.exists() {
-        return Ok(installed);
-    }
-
-    Ok(current)
+fn spawn_prepared_attach_command(
+    slave: &dyn portable_pty::SlavePty,
+    prepared: &super::PreparedAttach,
+    controlling_tty: bool,
+) -> Result<Box<dyn portable_pty::Child + Send + Sync>> {
+    slave
+        .spawn_command(prepared.command_builder(controlling_tty))
+        .context("failed to start Portal Hub terminal session")
 }
 
 impl Drop for TerminalPty {
@@ -3246,6 +3293,45 @@ mod tests {
             code_challenge_method: "S256".to_string(),
             state: "state-state-state".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn terminal_output_coalesces_ready_chunks() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(b"second".to_vec()).await.unwrap();
+        tx.send(b"third".to_vec()).await.unwrap();
+        drop(tx);
+
+        let output = coalesce_terminal_output(&mut rx, b"first".to_vec()).await;
+
+        assert_eq!(output, b"firstsecondthird");
+    }
+
+    #[tokio::test]
+    async fn terminal_output_waits_briefly_for_followup_chunk() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            tx.send(b"second".to_vec()).await.unwrap();
+        });
+
+        let output = coalesce_terminal_output(&mut rx, b"first".to_vec()).await;
+
+        assert_eq!(output, b"firstsecond");
+    }
+
+    #[tokio::test]
+    async fn terminal_output_stops_coalescing_at_frame_target() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(vec![b'b'; WEB_TERMINAL_OUTPUT_FRAME_TARGET_BYTES])
+            .await
+            .unwrap();
+        tx.send(b"remaining".to_vec()).await.unwrap();
+
+        let output = coalesce_terminal_output(&mut rx, b"first".to_vec()).await;
+
+        assert!(output.len() >= WEB_TERMINAL_OUTPUT_FRAME_TARGET_BYTES);
+        assert_eq!(rx.try_recv().unwrap(), b"remaining");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -18,6 +18,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
+use portable_pty::CommandBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -639,35 +640,67 @@ struct AttachRequest {
     replay_bytes: u64,
 }
 
-fn attach_session(state: &State, request: AttachRequest) -> Result<()> {
-    let AttachRequest {
-        session_id,
-        target_host,
-        target_port,
-        target_user,
-        cols,
-        rows,
-        max_log_bytes,
-        logging_mode,
-        allowed_targets,
-        identity_file,
-        batch_mode,
-        replay_bytes,
-    } = request;
+struct PreparedAttach {
+    session_id: Uuid,
+    target_host: String,
+    target_port: u16,
+    target_user: String,
+    cols: u16,
+    rows: u16,
+    max_log_bytes: u64,
+    logging_mode: LoggingMode,
+    socket_path: PathBuf,
+    log_path: PathBuf,
+    metadata: SessionMetadata,
+    should_replay: bool,
+    replay_bytes: u64,
+    argv: Vec<OsString>,
+}
 
-    validate_target(&target_host, target_port, &target_user)?;
-    validate_target_allowed(&target_host, &allowed_targets)?;
+fn attach_session(state: &State, request: AttachRequest) -> Result<()> {
+    let prepared = prepare_attach_session(state, request)?;
+    let mut command = prepared.command();
+    command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    let mut child = command.spawn().context("failed to start dtach")?;
+    let mut prepared = prepared;
+    prepared.record_process_id(state, i32::try_from(child.id()).ok())?;
+
+    prepared.replay_if_requested()?;
+
+    let status = child.wait().context("failed to wait for dtach")?;
+    finish_attach_session(state, prepared, status.success())?;
+
+    if status.success() {
+        return Ok(());
+    }
+
+    match status.code() {
+        Some(code) => std::process::exit(code),
+        None => std::process::exit(128 + status.signal().unwrap_or(1)),
+    }
+}
+
+fn prepare_attach_session(state: &State, request: AttachRequest) -> Result<PreparedAttach> {
+    validate_target(
+        &request.target_host,
+        request.target_port,
+        &request.target_user,
+    )?;
+    validate_target_allowed(&request.target_host, &request.allowed_targets)?;
     ensure_binary("dtach").context("install dtach on the Portal Hub host")?;
     ensure_binary("ssh").context("install OpenSSH client on the Portal Hub host")?;
-    if logging_mode == LoggingMode::Full {
+    if request.logging_mode == LoggingMode::Full {
         ensure_binary("script").context("install util-linux on the Portal Hub host")?;
     }
 
     state.ensure_dirs()?;
-    let session_name = format!("portal-{}", session_id);
-    let socket_path = state.session_socket_path(session_id);
+    let session_name = format!("portal-{}", request.session_id);
+    let socket_path = state.session_socket_path(request.session_id);
     let now = Utc::now();
-    let existing = state.load_session(session_id)?;
+    let existing = state.load_session(request.session_id)?;
     let should_replay = existing
         .as_ref()
         .is_some_and(|session| session.ended_at.is_none() && socket_path.exists());
@@ -681,11 +714,11 @@ fn attach_session(state: &State, request: AttachRequest) -> Result<()> {
         })
         .unwrap_or(SessionMetadata {
             schema_version: METADATA_SCHEMA_VERSION,
-            session_id,
+            session_id: request.session_id,
             session_name,
-            target_host: target_host.clone(),
-            target_port,
-            target_user: target_user.clone(),
+            target_host: request.target_host.clone(),
+            target_port: request.target_port,
+            target_user: request.target_user.clone(),
             created_at: now,
             updated_at: now,
             ended_at: None,
@@ -694,64 +727,127 @@ fn attach_session(state: &State, request: AttachRequest) -> Result<()> {
         });
     state.save_session(&metadata)?;
 
-    let log_path = state.session_log_path(session_id);
-    if logging_mode == LoggingMode::Full && !should_replay {
+    let log_path = state.session_log_path(request.session_id);
+    if request.logging_mode == LoggingMode::Full && !should_replay {
         remove_file_if_exists(&log_path)?;
     }
 
     let ssh_command = target_ssh_command(
-        rows,
-        cols,
+        request.rows,
+        request.cols,
         &state.known_hosts_path(),
-        target_port,
-        &target_user,
-        &target_host,
-        identity_file.as_deref(),
-        batch_mode,
+        request.target_port,
+        &request.target_user,
+        &request.target_host,
+        request.identity_file.as_deref(),
+        request.batch_mode,
     );
+    let argv = attach_command_argv(
+        &socket_path,
+        request.logging_mode,
+        &log_path,
+        request.max_log_bytes,
+        &ssh_command,
+    )?;
 
-    let mut command = Command::new("dtach");
-    command.arg("-A").arg(&socket_path).arg("-r").arg("winch");
+    Ok(PreparedAttach {
+        session_id: request.session_id,
+        target_host: request.target_host,
+        target_port: request.target_port,
+        target_user: request.target_user,
+        cols: request.cols,
+        rows: request.rows,
+        max_log_bytes: request.max_log_bytes,
+        logging_mode: request.logging_mode,
+        socket_path,
+        log_path,
+        metadata,
+        should_replay,
+        replay_bytes: request.replay_bytes,
+        argv,
+    })
+}
 
-    match logging_mode {
-        LoggingMode::Full => {
-            command.arg("sh").arg("-lc").arg(record_session_command(
-                &log_path,
-                max_log_bytes,
-                &ssh_command,
-            )?);
+fn attach_command_argv(
+    socket_path: &Path,
+    logging_mode: LoggingMode,
+    log_path: &Path,
+    max_log_bytes: u64,
+    ssh_command: &str,
+) -> Result<Vec<OsString>> {
+    let mut argv = vec![
+        OsString::from("dtach"),
+        OsString::from("-A"),
+        socket_path.as_os_str().to_os_string(),
+        OsString::from("-r"),
+        OsString::from("winch"),
+        OsString::from("sh"),
+        OsString::from("-lc"),
+    ];
+
+    let shell_command = match logging_mode {
+        LoggingMode::Full => record_session_command(log_path, max_log_bytes, ssh_command)?,
+        LoggingMode::Disabled => ssh_command.to_string(),
+    };
+    argv.push(shell_command.into());
+    Ok(argv)
+}
+
+impl PreparedAttach {
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.argv[0]);
+        command.args(&self.argv[1..]);
+        self.apply_env_to_command(&mut command);
+        command
+    }
+
+    fn command_builder(&self, controlling_tty: bool) -> CommandBuilder {
+        let mut command = CommandBuilder::from_argv(self.argv.clone());
+        command.set_controlling_tty(controlling_tty);
+        self.apply_env_to_command_builder(&mut command);
+        command
+    }
+
+    fn record_process_id(&mut self, state: &State, process_id: Option<i32>) -> Result<()> {
+        self.metadata.process_id = process_id;
+        self.metadata.updated_at = Utc::now();
+        state.save_session(&self.metadata)
+    }
+
+    fn replay_if_requested(&self) -> Result<()> {
+        if self.logging_mode == LoggingMode::Full && self.should_replay && self.replay_bytes > 0 {
+            thread::sleep(Duration::from_millis(75));
+            replay_log_tail(&self.log_path, self.replay_bytes.min(MAX_REPLAY_BYTES))?;
         }
-        LoggingMode::Disabled => {
-            command.arg("sh").arg("-lc").arg(ssh_command);
+        Ok(())
+    }
+
+    fn apply_env_to_command(&self, command: &mut Command) {
+        for (key, value) in self.env() {
+            command.env(key, value);
         }
     }
 
-    let mut child = command
-        .env("TERM", "xterm-256color")
-        .env("COLORTERM", "truecolor")
-        .env("COLUMNS", cols.to_string())
-        .env("LINES", rows.to_string())
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .context("failed to start dtach")?;
-    let process_id = i32::try_from(child.id()).ok();
-    let mut metadata = metadata;
-    metadata.process_id = process_id;
-    metadata.updated_at = Utc::now();
-    state.save_session(&metadata)?;
-
-    if logging_mode == LoggingMode::Full && should_replay && replay_bytes > 0 {
-        thread::sleep(Duration::from_millis(75));
-        replay_log_tail(&log_path, replay_bytes.min(MAX_REPLAY_BYTES))?;
+    fn apply_env_to_command_builder(&self, command: &mut CommandBuilder) {
+        for (key, value) in self.env() {
+            command.env(key, value);
+        }
     }
 
-    let status = child.wait().context("failed to wait for dtach")?;
+    fn env(&self) -> [(&'static OsStr, OsString); 4] {
+        [
+            (OsStr::new("TERM"), OsString::from("xterm-256color")),
+            (OsStr::new("COLORTERM"), OsString::from("truecolor")),
+            (OsStr::new("COLUMNS"), OsString::from(self.cols.to_string())),
+            (OsStr::new("LINES"), OsString::from(self.rows.to_string())),
+        ]
+    }
+}
 
-    let mut updated = metadata;
+fn finish_attach_session(state: &State, prepared: PreparedAttach, success: bool) -> Result<()> {
+    let mut updated = prepared.metadata;
     updated.updated_at = Utc::now();
-    updated.ended_at = if socket_path.exists() {
+    updated.ended_at = if prepared.socket_path.exists() {
         None
     } else {
         Some(updated.updated_at)
@@ -760,34 +856,25 @@ fn attach_session(state: &State, request: AttachRequest) -> Result<()> {
         updated.process_group_id = None;
         updated.process_id = None;
     }
-    if logging_mode == LoggingMode::Full && updated.ended_at.is_some() && max_log_bytes > 0 {
-        truncate_log_to_tail(&log_path, max_log_bytes)?;
+    if prepared.logging_mode == LoggingMode::Full
+        && updated.ended_at.is_some()
+        && prepared.max_log_bytes > 0
+    {
+        truncate_log_to_tail(&prepared.log_path, prepared.max_log_bytes)?;
     }
     state.save_session(&updated)?;
+    let audit_success = success || updated.ended_at.is_none();
     state.audit(
         "session_attach",
-        if status.success() {
-            "success"
-        } else {
-            "failure"
-        },
+        if audit_success { "success" } else { "failure" },
         json!({
-            "session_id": session_id,
-            "target_host": target_host,
-            "target_port": target_port,
-            "target_user": target_user,
+            "session_id": prepared.session_id,
+            "target_host": prepared.target_host,
+            "target_port": prepared.target_port,
+            "target_user": prepared.target_user,
             "ended": updated.ended_at.is_some(),
         }),
-    )?;
-
-    if status.success() {
-        return Ok(());
-    }
-
-    match status.code() {
-        Some(code) => std::process::exit(code),
-        None => std::process::exit(128 + status.signal().unwrap_or(1)),
-    }
+    )
 }
 
 fn record_session_command(
@@ -1788,6 +1875,25 @@ mod tests {
         assert!(command.contains("--max-log-bytes 16"));
         assert!(command.contains("'ssh example.com'"));
         assert!(!command.contains("output-limit"));
+    }
+
+    #[test]
+    fn attach_command_argv_starts_dtach_directly() {
+        let argv = attach_command_argv(
+            Path::new("/tmp/portal.sock"),
+            LoggingMode::Disabled,
+            Path::new("/tmp/portal.log"),
+            16,
+            "ssh example.com",
+        )
+        .unwrap();
+
+        assert_eq!(argv.first().and_then(|arg| arg.to_str()), Some("dtach"));
+        assert!(!argv.iter().any(|arg| arg == "attach"));
+        assert_eq!(
+            argv.last().and_then(|arg| arg.to_str()),
+            Some("ssh example.com")
+        );
     }
 
     #[test]
