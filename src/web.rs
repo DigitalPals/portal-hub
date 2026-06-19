@@ -5,8 +5,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -35,6 +35,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tokio_stream::once;
 use tokio_stream::wrappers::BroadcastStream;
 use tower_http::trace::TraceLayer;
@@ -52,6 +53,8 @@ const MIN_PASSWORD_LEN: usize = 12;
 const MAX_WEB_SESSION_PREVIEW_BYTES: u64 = 64 * 1024;
 const WEB_TERMINAL_OUTPUT_COALESCE_DELAY: Duration = Duration::from_millis(4);
 const WEB_TERMINAL_OUTPUT_FRAME_TARGET_BYTES: usize = 64 * 1024;
+const HOST_KEY_SCAN_TIMEOUT_SECS: &str = "5";
+const HOST_KEY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 
 const PORTAL_ASCII_LOGO: &str = r#"                                  .             oooo
                                 .o8             `888
@@ -246,6 +249,38 @@ struct WebTerminalStart {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WebTerminalControl {
     Resize { cols: u16, rows: u16 },
+    HostKeyResponse { accepted: bool },
+}
+
+#[derive(Debug, Serialize)]
+struct WebTerminalHostKeyVerification {
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    host: String,
+    port: u16,
+    fingerprint: String,
+    key_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    old_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ScannedHostKey {
+    key_type: String,
+    key_blob: String,
+    fingerprint: String,
+}
+
+#[derive(Debug)]
+struct PendingHostKeyVerification {
+    challenge: WebTerminalHostKeyVerification,
+    scanned_keys: Vec<ScannedHostKey>,
+}
+
+#[derive(Debug)]
+enum TerminalHostKeyStatus {
+    Known,
+    VerificationRequired(PendingHostKeyVerification),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1011,6 +1046,15 @@ async fn handle_terminal_socket(state: AppState, socket: WebSocket) {
         }
     };
 
+    if let Err(error) = verify_terminal_host_key(&state, &start, &mut ws_tx, &mut ws_rx).await {
+        let _ = ws_tx
+            .send(WsMessage::Text(
+                json!({"type": "error", "message": error.to_string()}).to_string(),
+            ))
+            .await;
+        return;
+    }
+
     let mut terminal = match spawn_terminal_pty(&state, &start) {
         Ok(terminal) => terminal,
         Err(error) => {
@@ -1139,6 +1183,309 @@ fn drain_ready_terminal_output(output_rx: &mut mpsc::Receiver<Vec<u8>>, output: 
             }
         }
     }
+}
+
+async fn verify_terminal_host_key(
+    state: &AppState,
+    start: &WebTerminalStart,
+    ws_tx: &mut futures_util::stream::SplitSink<WebSocket, WsMessage>,
+    ws_rx: &mut futures_util::stream::SplitStream<WebSocket>,
+) -> Result<()> {
+    let known_hosts = known_hosts_path(&state.state_dir);
+    let host = start.target_host.clone();
+    let port = start.target_port;
+    let status =
+        tokio::task::spawn_blocking(move || terminal_host_key_status(&known_hosts, &host, port))
+            .await
+            .context("host key verification task failed")??;
+
+    let TerminalHostKeyStatus::VerificationRequired(pending) = status else {
+        return Ok(());
+    };
+
+    ws_tx
+        .send(WsMessage::Text(serde_json::to_string(&pending.challenge)?))
+        .await
+        .context("failed to send host key verification request")?;
+
+    let accepted = wait_for_host_key_response(ws_tx, ws_rx).await?;
+    if !accepted {
+        bail!("host key rejected by user");
+    }
+
+    let known_hosts = known_hosts_path(&state.state_dir);
+    let host = start.target_host.clone();
+    let port = start.target_port;
+    tokio::task::spawn_blocking(move || {
+        accept_terminal_host_key(&known_hosts, &host, port, &pending.scanned_keys)
+    })
+    .await
+    .context("host key update task failed")??;
+
+    Ok(())
+}
+
+async fn wait_for_host_key_response(
+    ws_tx: &mut futures_util::stream::SplitSink<WebSocket, WsMessage>,
+    ws_rx: &mut futures_util::stream::SplitStream<WebSocket>,
+) -> Result<bool> {
+    loop {
+        let message = timeout(HOST_KEY_RESPONSE_TIMEOUT, ws_rx.next())
+            .await
+            .context("timed out waiting for host key response")?
+            .ok_or_else(|| anyhow!("terminal socket closed during host key verification"))?
+            .context("terminal socket failed during host key verification")?;
+
+        match message {
+            WsMessage::Text(text) => match serde_json::from_str::<WebTerminalControl>(&text) {
+                Ok(WebTerminalControl::HostKeyResponse { accepted }) => return Ok(accepted),
+                Ok(WebTerminalControl::Resize { .. }) => {}
+                Err(_) => {}
+            },
+            WsMessage::Close(_) => bail!("terminal socket closed during host key verification"),
+            WsMessage::Ping(data) => {
+                let _ = ws_tx.send(WsMessage::Pong(data)).await;
+            }
+            WsMessage::Pong(_) | WsMessage::Binary(_) => {}
+        }
+    }
+}
+
+fn terminal_host_key_status(
+    known_hosts_path: &Path,
+    host: &str,
+    port: u16,
+) -> Result<TerminalHostKeyStatus> {
+    let scanned_keys = scan_host_keys(host, port)?;
+    let known_keys = known_host_keys(known_hosts_path, host, port)?;
+
+    if known_keys.is_empty() {
+        let first = scanned_keys
+            .first()
+            .ok_or_else(|| anyhow!("ssh-keyscan returned no host keys for {}:{}", host, port))?;
+        return Ok(TerminalHostKeyStatus::VerificationRequired(
+            PendingHostKeyVerification {
+                challenge: WebTerminalHostKeyVerification {
+                    message_type: "host_key_verification",
+                    host: host.to_string(),
+                    port,
+                    fingerprint: first.fingerprint.clone(),
+                    key_type: first.key_type.clone(),
+                    old_fingerprint: None,
+                },
+                scanned_keys,
+            },
+        ));
+    }
+
+    if scanned_keys.iter().any(|scanned| {
+        known_keys
+            .iter()
+            .any(|known| known.key_blob == scanned.key_blob)
+    }) {
+        return Ok(TerminalHostKeyStatus::Known);
+    }
+
+    let first = scanned_keys
+        .first()
+        .ok_or_else(|| anyhow!("ssh-keyscan returned no host keys for {}:{}", host, port))?;
+    let old_fingerprint = known_keys
+        .iter()
+        .find_map(|key| {
+            if key.fingerprint.is_empty() {
+                None
+            } else {
+                Some(key.fingerprint.clone())
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    Ok(TerminalHostKeyStatus::VerificationRequired(
+        PendingHostKeyVerification {
+            challenge: WebTerminalHostKeyVerification {
+                message_type: "host_key_verification",
+                host: host.to_string(),
+                port,
+                fingerprint: first.fingerprint.clone(),
+                key_type: first.key_type.clone(),
+                old_fingerprint: Some(old_fingerprint),
+            },
+            scanned_keys,
+        },
+    ))
+}
+
+fn scan_host_keys(host: &str, port: u16) -> Result<Vec<ScannedHostKey>> {
+    let output = Command::new("ssh-keyscan")
+        .args([
+            "-T",
+            HOST_KEY_SCAN_TIMEOUT_SECS,
+            "-p",
+            &port.to_string(),
+            host,
+        ])
+        .output()
+        .with_context(|| format!("failed to scan host key for {}:{}", host, port))?;
+
+    if !output.status.success() && output.stdout.is_empty() {
+        bail!(
+            "ssh-keyscan failed for {}:{}: {}",
+            host,
+            port,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let mut keys = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(key) = parse_known_host_key_line(line)? {
+            keys.push(key);
+        }
+    }
+
+    if keys.is_empty() {
+        bail!(
+            "ssh-keyscan returned no usable host keys for {}:{}",
+            host,
+            port
+        );
+    }
+
+    Ok(keys)
+}
+
+fn known_host_keys(known_hosts_path: &Path, host: &str, port: u16) -> Result<Vec<ScannedHostKey>> {
+    if !known_hosts_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let marker = host_marker(host, port);
+    let output = Command::new("ssh-keygen")
+        .arg("-F")
+        .arg(&marker)
+        .arg("-f")
+        .arg(known_hosts_path)
+        .output()
+        .with_context(|| format!("failed to inspect known_hosts for {}", marker))?;
+
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    let mut keys = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(key) = parse_known_host_key_line(line)? {
+            keys.push(key);
+        }
+    }
+
+    Ok(keys)
+}
+
+fn accept_terminal_host_key(
+    known_hosts_path: &Path,
+    host: &str,
+    port: u16,
+    scanned_keys: &[ScannedHostKey],
+) -> Result<()> {
+    let marker = host_marker(host, port);
+    if let Some(parent) = known_hosts_path.parent() {
+        fs::create_dir_all(parent).context("failed to create ssh state directory")?;
+    }
+
+    if known_hosts_path.exists() {
+        let _ = Command::new("ssh-keygen")
+            .arg("-R")
+            .arg(&marker)
+            .arg("-f")
+            .arg(known_hosts_path)
+            .output();
+
+        let old_path = known_hosts_path.with_extension("old");
+        let _ = fs::remove_file(old_path);
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(known_hosts_path)
+        .with_context(|| format!("failed to open {}", known_hosts_path.display()))?;
+
+    for key in scanned_keys {
+        writeln!(file, "{} {} {}", marker, key.key_type, key.key_blob)
+            .context("failed to write known_hosts entry")?;
+    }
+
+    Ok(())
+}
+
+fn parse_known_host_key_line(line: &str) -> Result<Option<ScannedHostKey>> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return Ok(None);
+    }
+
+    let fields: Vec<&str> = trimmed.split_whitespace().collect();
+    if fields.len() < 3 {
+        return Ok(None);
+    }
+
+    let normalized_line = format!("{} {} {}", fields[0], fields[1], fields[2]);
+    Ok(Some(ScannedHostKey {
+        key_type: fields[1].to_string(),
+        key_blob: fields[2].to_string(),
+        fingerprint: fingerprint_known_host_line(&normalized_line)?,
+    }))
+}
+
+fn fingerprint_known_host_line(line: &str) -> Result<String> {
+    let mut child = Command::new("ssh-keygen")
+        .arg("-l")
+        .arg("-f")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to start ssh-keygen for host key fingerprint")?;
+
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| anyhow!("failed to open ssh-keygen stdin"))?;
+        writeln!(stdin, "{}", line).context("failed to pass host key to ssh-keygen")?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .context("failed to read ssh-keygen fingerprint")?;
+    if !output.status.success() {
+        bail!(
+            "failed to fingerprint host key: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("unknown")
+        .to_string())
+}
+
+fn host_marker(host: &str, port: u16) -> String {
+    if port == 22 {
+        host.to_string()
+    } else {
+        format!("[{}]:{}", host, port)
+    }
+}
+
+fn known_hosts_path(state_dir: &Path) -> PathBuf {
+    ssh_dir(state_dir).join("known_hosts")
 }
 
 struct TerminalPty {
@@ -3389,6 +3736,26 @@ mod tests {
             link,
             "com.digitalpals.portal.android:/pair?hub_url=https%3A%2F%2Fportal-hub.example.ts.net%3A8080&pairing_id=pair-1"
         );
+    }
+
+    #[test]
+    fn host_marker_uses_openssh_port_format() {
+        assert_eq!(host_marker("example.internal", 22), "example.internal");
+        assert_eq!(
+            host_marker("example.internal", 2222),
+            "[example.internal]:2222"
+        );
+    }
+
+    #[test]
+    fn host_key_response_control_deserializes() {
+        let control: WebTerminalControl =
+            serde_json::from_value(json!({"type": "host_key_response", "accepted": true})).unwrap();
+
+        match control {
+            WebTerminalControl::HostKeyResponse { accepted } => assert!(accepted),
+            WebTerminalControl::Resize { .. } => panic!("expected host key response"),
+        }
     }
 
     #[test]

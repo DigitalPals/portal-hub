@@ -225,6 +225,21 @@ fn terminal_websocket_contracts_cover_client_and_server_messages() {
         "terminal-control-message",
         json!({ "type": "resize", "cols": 100, "rows": 40 }),
     );
+    assert_valid(
+        "terminal-control-message",
+        json!({
+            "type": "host_key_verification",
+            "host": "example.internal",
+            "port": 22,
+            "fingerprint": "SHA256:abc123",
+            "key_type": "ssh-ed25519",
+            "old_fingerprint": "SHA256:old123"
+        }),
+    );
+    assert_valid(
+        "terminal-control-message",
+        json!({ "type": "host_key_response", "accepted": true }),
+    );
 }
 
 #[test]

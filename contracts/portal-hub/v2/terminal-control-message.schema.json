@@ -38,6 +38,28 @@
         "rows": { "type": "integer", "minimum": 1, "maximum": 1000 }
       },
       "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "host", "port", "fingerprint", "key_type"],
+      "properties": {
+        "type": { "const": "host_key_verification" },
+        "host": { "type": "string", "minLength": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "fingerprint": { "type": "string", "minLength": 1 },
+        "key_type": { "type": "string", "minLength": 1 },
+        "old_fingerprint": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "accepted"],
+      "properties": {
+        "type": { "const": "host_key_response" },
+        "accepted": { "type": "boolean" }
+      },
+      "additionalProperties": false
     }
   ]
 }

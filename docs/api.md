@@ -219,6 +219,7 @@ first client message is a JSON terminal start request with `session_id`,
 `replay_bytes` and `private_key`. `replay_bytes` controls how many bytes of
 stored log output Hub writes before attaching to an existing live session; it
 defaults to `0` so web clients resume without replay. Hub replies with `{"type":"started"}` or `{"type":"error"}`.
+Before `started`, Hub may send `{"type":"host_key_verification","host":"example.internal","port":22,"fingerprint":"SHA256:...","key_type":"ssh-ed25519","old_fingerprint":"SHA256:..."}` when the target SSH host key is unknown or changed. The client must answer with `{"type":"host_key_response","accepted":true}` to trust the scanned key in Hub's `known_hosts`, or `accepted:false` to deny the connection.
 Binary WebSocket messages carry terminal input and output. Resize control
 messages use `{"type":"resize","cols":120,"rows":30}`.
 
