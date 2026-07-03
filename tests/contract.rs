@@ -240,6 +240,31 @@ fn terminal_websocket_contracts_cover_client_and_server_messages() {
         "terminal-control-message",
         json!({ "type": "host_key_response", "accepted": true }),
     );
+    assert_valid(
+        "terminal-control-message",
+        json!({
+            "type": "upload_file",
+            "request_id": session_id,
+            "filename": "portal-paste-20260703-120000-abc.png",
+            "contents_base64": "cG5n"
+        }),
+    );
+    assert_valid(
+        "terminal-control-message",
+        json!({
+            "type": "upload_file_result",
+            "request_id": session_id,
+            "path": "/home/john/.cache/portal/pastes/portal-paste-20260703-120000-abc.png"
+        }),
+    );
+    assert_valid(
+        "terminal-control-message",
+        json!({
+            "type": "upload_file_result",
+            "request_id": session_id,
+            "error": "target upload failed"
+        }),
+    );
 }
 
 #[test]

@@ -60,6 +60,37 @@
         "accepted": { "type": "boolean" }
       },
       "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "request_id", "filename", "contents_base64"],
+      "properties": {
+        "type": { "const": "upload_file" },
+        "request_id": { "type": "string", "format": "uuid" },
+        "filename": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 160,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.png$"
+        },
+        "contents_base64": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "request_id"],
+      "properties": {
+        "type": { "const": "upload_file_result" },
+        "request_id": { "type": "string", "format": "uuid" },
+        "path": { "type": "string", "minLength": 1 },
+        "error": { "type": "string", "minLength": 1 }
+      },
+      "oneOf": [
+        { "required": ["path"], "not": { "required": ["error"] } },
+        { "required": ["error"], "not": { "required": ["path"] } }
+      ],
+      "additionalProperties": false
     }
   ]
 }

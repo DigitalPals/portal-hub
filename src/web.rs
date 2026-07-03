@@ -33,6 +33,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokio::process::Command as TokioCommand;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -53,6 +54,8 @@ const MIN_PASSWORD_LEN: usize = 12;
 const MAX_WEB_SESSION_PREVIEW_BYTES: u64 = 64 * 1024;
 const WEB_TERMINAL_OUTPUT_COALESCE_DELAY: Duration = Duration::from_millis(4);
 const WEB_TERMINAL_OUTPUT_FRAME_TARGET_BYTES: usize = 64 * 1024;
+const WEB_TERMINAL_UPLOAD_MAX_BYTES: usize = 64 * 1024 * 1024;
+const WEB_TERMINAL_UPLOAD_TIMEOUT: Duration = Duration::from_secs(45);
 const HOST_KEY_SCAN_TIMEOUT_SECS: &str = "5";
 const HOST_KEY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -248,8 +251,18 @@ struct WebTerminalStart {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WebTerminalControl {
-    Resize { cols: u16, rows: u16 },
-    HostKeyResponse { accepted: bool },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
+    HostKeyResponse {
+        accepted: bool,
+    },
+    UploadFile {
+        request_id: Uuid,
+        filename: String,
+        contents_base64: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -262,6 +275,20 @@ struct WebTerminalHostKeyVerification {
     key_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     old_fingerprint: Option<String>,
+}
+
+#[derive(Clone)]
+struct WebTerminalUploadTarget {
+    target_host: String,
+    target_port: u16,
+    target_user: String,
+    known_hosts_path: PathBuf,
+    identity_file: Option<PathBuf>,
+}
+
+struct WebTerminalUploadResult {
+    request_id: Uuid,
+    result: Result<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1074,6 +1101,8 @@ async fn handle_terminal_socket(state: AppState, socket: WebSocket) {
         ))
         .await;
 
+    let (upload_result_tx, mut upload_result_rx) = mpsc::channel::<WebTerminalUploadResult>(8);
+
     loop {
         tokio::select! {
             output = terminal.output_rx.recv() => {
@@ -1098,6 +1127,30 @@ async fn handle_terminal_socket(state: AppState, socket: WebSocket) {
                     break;
                 }
             }
+            upload_result = upload_result_rx.recv() => {
+                let Some(upload_result) = upload_result else {
+                    continue;
+                };
+                let payload = match upload_result.result {
+                    Ok(path) => json!({
+                        "type": "upload_file_result",
+                        "request_id": upload_result.request_id,
+                        "path": path,
+                    }),
+                    Err(error) => json!({
+                        "type": "upload_file_result",
+                        "request_id": upload_result.request_id,
+                        "error": error,
+                    }),
+                };
+                if ws_tx
+                    .send(WsMessage::Text(payload.to_string()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
             message = ws_rx.next() => {
                 let Some(message) = message else {
                     break;
@@ -1119,15 +1172,36 @@ async fn handle_terminal_socket(state: AppState, socket: WebSocket) {
                         }
                     }
                     Ok(WsMessage::Text(text)) => {
-                        if let Ok(WebTerminalControl::Resize { cols, rows }) =
-                            serde_json::from_str::<WebTerminalControl>(&text)
-                        {
-                            let _ = terminal.master.resize(PtySize {
-                                rows,
-                                cols,
-                                pixel_width: 0,
-                                pixel_height: 0,
-                            });
+                        match serde_json::from_str::<WebTerminalControl>(&text) {
+                            Ok(WebTerminalControl::Resize { cols, rows }) => {
+                                let _ = terminal.master.resize(PtySize {
+                                    rows,
+                                    cols,
+                                    pixel_width: 0,
+                                    pixel_height: 0,
+                                });
+                            }
+                            Ok(WebTerminalControl::UploadFile {
+                                request_id,
+                                filename,
+                                contents_base64,
+                            }) => {
+                                let upload_target = terminal.upload_target.clone();
+                                let upload_result_tx = upload_result_tx.clone();
+                                tokio::spawn(async move {
+                                    let result = upload_file_to_target(
+                                        upload_target,
+                                        filename,
+                                        contents_base64,
+                                    )
+                                    .await
+                                    .map_err(|error| error.to_string());
+                                    let _ = upload_result_tx
+                                        .send(WebTerminalUploadResult { request_id, result })
+                                        .await;
+                                });
+                            }
+                            Ok(WebTerminalControl::HostKeyResponse { .. }) | Err(_) => {}
                         }
                     }
                     Ok(WsMessage::Close(_)) => break,
@@ -1172,6 +1246,168 @@ async fn coalesce_terminal_output(
     }
 
     output
+}
+
+async fn upload_file_to_target(
+    target: WebTerminalUploadTarget,
+    filename: String,
+    contents_base64: String,
+) -> Result<String> {
+    validate_upload_filename(&filename)?;
+    let max_base64_len = WEB_TERMINAL_UPLOAD_MAX_BYTES.div_ceil(3) * 4 + 4;
+    if contents_base64.len() > max_base64_len {
+        bail!("upload payload is too large");
+    }
+
+    let contents = BASE64_STANDARD
+        .decode(contents_base64.as_bytes())
+        .context("upload payload is not valid base64")?;
+    if contents.is_empty() {
+        bail!("upload payload is empty");
+    }
+    if contents.len() > WEB_TERMINAL_UPLOAD_MAX_BYTES {
+        bail!("upload payload is too large");
+    }
+
+    let mut command = target_upload_ssh_command(&target, &filename);
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    command.kill_on_drop(true);
+
+    let mut child = command
+        .spawn()
+        .context("failed to start target upload SSH command")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("failed to open target upload stdin"))?;
+
+    {
+        use tokio::io::AsyncWriteExt;
+        stdin
+            .write_all(&contents)
+            .await
+            .context("failed to stream upload payload to target")?;
+        stdin
+            .shutdown()
+            .await
+            .context("failed to close target upload stdin")?;
+    }
+    drop(stdin);
+
+    let output = timeout(WEB_TERMINAL_UPLOAD_TIMEOUT, child.wait_with_output())
+        .await
+        .context("target upload timed out")?
+        .context("failed to wait for target upload command")?;
+
+    if !output.status.success() {
+        bail!(
+            "target upload failed: {}",
+            command_output_message(&output.stderr)
+        );
+    }
+
+    let stdout =
+        String::from_utf8(output.stdout).context("target upload returned non-UTF-8 output")?;
+    let path = stdout
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .ok_or_else(|| anyhow!("target upload did not return a remote path"))?;
+    if !path.starts_with('/') {
+        bail!("target upload returned a non-absolute path: {}", path);
+    }
+
+    Ok(path.to_string())
+}
+
+fn target_upload_ssh_command(target: &WebTerminalUploadTarget, filename: &str) -> TokioCommand {
+    let mut command = TokioCommand::new("ssh");
+    command
+        .arg("-F")
+        .arg("/dev/null")
+        .arg("-o")
+        .arg("ForwardAgent=yes")
+        .arg("-o")
+        .arg(if target.identity_file.is_some() {
+            "IdentitiesOnly=yes"
+        } else {
+            "IdentitiesOnly=no"
+        })
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg(format!(
+            "UserKnownHostsFile={}",
+            target.known_hosts_path.display()
+        ))
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=10")
+        .arg("-p")
+        .arg(target.target_port.to_string())
+        .arg("-l")
+        .arg(&target.target_user);
+
+    if let Some(identity_file) = &target.identity_file {
+        command.arg("-i").arg(identity_file);
+    }
+
+    command
+        .arg(&target.target_host)
+        .arg(remote_upload_shell_command(filename));
+    command
+}
+
+fn remote_upload_shell_command(filename: &str) -> String {
+    let script = format!(
+        concat!(
+            "filename={}; ",
+            "dir=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/portal/pastes\"; ",
+            "umask 077; ",
+            "mkdir -p \"$dir\"; ",
+            "chmod 700 \"${{XDG_CACHE_HOME:-$HOME/.cache}}/portal\" \"$dir\" 2>/dev/null || true; ",
+            "path=\"$dir/$filename\"; ",
+            "if [ -e \"$path\" ]; then echo \"remote paste file already exists\" >&2; exit 73; fi; ",
+            "cat > \"$path\"; ",
+            "chmod 600 \"$path\" 2>/dev/null || true; ",
+            "printf \"%s\\n\" \"$path\""
+        ),
+        super::shell_quote(filename)
+    );
+
+    format!("/bin/sh -c {}", super::shell_quote(&script))
+}
+
+fn validate_upload_filename(filename: &str) -> Result<()> {
+    if filename.is_empty() || filename.len() > 160 {
+        bail!("invalid upload filename length");
+    }
+    if !filename.ends_with(".png") {
+        bail!("upload filename must end in .png");
+    }
+    if filename.starts_with('.') {
+        bail!("upload filename must not be hidden");
+    }
+    if !filename
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        bail!("upload filename contains unsupported characters");
+    }
+    Ok(())
+}
+
+fn command_output_message(stderr: &[u8]) -> String {
+    let message = String::from_utf8_lossy(stderr);
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return "ssh command exited unsuccessfully".to_string();
+    }
+    trimmed.chars().take(4096).collect()
 }
 
 fn drain_ready_terminal_output(output_rx: &mut mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) {
@@ -1239,7 +1475,7 @@ async fn wait_for_host_key_response(
         match message {
             WsMessage::Text(text) => match serde_json::from_str::<WebTerminalControl>(&text) {
                 Ok(WebTerminalControl::HostKeyResponse { accepted }) => return Ok(accepted),
-                Ok(WebTerminalControl::Resize { .. }) => {}
+                Ok(WebTerminalControl::Resize { .. } | WebTerminalControl::UploadFile { .. }) => {}
                 Err(_) => {}
             },
             WsMessage::Close(_) => bail!("terminal socket closed during host key verification"),
@@ -1495,6 +1731,7 @@ struct TerminalPty {
     output_rx: mpsc::Receiver<Vec<u8>>,
     child_exit_rx: mpsc::Receiver<()>,
     identity_file: Option<PathBuf>,
+    upload_target: WebTerminalUploadTarget,
 }
 
 fn spawn_terminal_pty(state: &AppState, start: &WebTerminalStart) -> Result<TerminalPty> {
@@ -1509,6 +1746,13 @@ fn spawn_terminal_pty(state: &AppState, start: &WebTerminalStart) -> Result<Term
         .context("failed to open terminal pty")?;
 
     let identity_file = write_web_identity_file(state, start.private_key.as_deref())?;
+    let upload_target = WebTerminalUploadTarget {
+        target_host: start.target_host.clone(),
+        target_port: start.target_port,
+        target_user: start.target_user.clone(),
+        known_hosts_path: known_hosts_path(&state.state_dir),
+        identity_file: identity_file.clone(),
+    };
     let hub_state = super::State::new(state.state_dir.clone());
     let attach_request = super::AttachRequest {
         session_id: start.session_id,
@@ -1605,6 +1849,7 @@ fn spawn_terminal_pty(state: &AppState, start: &WebTerminalStart) -> Result<Term
         output_rx,
         child_exit_rx,
         identity_file,
+        upload_target,
     })
 }
 
@@ -3754,8 +3999,59 @@ mod tests {
 
         match control {
             WebTerminalControl::HostKeyResponse { accepted } => assert!(accepted),
-            WebTerminalControl::Resize { .. } => panic!("expected host key response"),
+            WebTerminalControl::Resize { .. } | WebTerminalControl::UploadFile { .. } => {
+                panic!("expected host key response")
+            }
         }
+    }
+
+    #[test]
+    fn upload_file_control_deserializes() {
+        let request_id = Uuid::new_v4();
+        let control: WebTerminalControl = serde_json::from_value(json!({
+            "type": "upload_file",
+            "request_id": request_id,
+            "filename": "portal-paste-20260703-120000-abc.png",
+            "contents_base64": "cG5n"
+        }))
+        .unwrap();
+
+        match control {
+            WebTerminalControl::UploadFile {
+                request_id: parsed_id,
+                filename,
+                contents_base64,
+            } => {
+                assert_eq!(parsed_id, request_id);
+                assert_eq!(filename, "portal-paste-20260703-120000-abc.png");
+                assert_eq!(contents_base64, "cG5n");
+            }
+            WebTerminalControl::Resize { .. } | WebTerminalControl::HostKeyResponse { .. } => {
+                panic!("expected upload file")
+            }
+        }
+    }
+
+    #[test]
+    fn upload_filename_validation_rejects_path_traversal() {
+        validate_upload_filename("portal-paste-20260703-120000-abc.png").unwrap();
+        assert!(validate_upload_filename("../secret.png").is_err());
+        assert!(validate_upload_filename("portal-paste.png;touch-owned.png").is_err());
+        assert!(validate_upload_filename(".hidden.png").is_err());
+        assert!(validate_upload_filename("portal-paste.jpg").is_err());
+    }
+
+    #[test]
+    fn remote_upload_command_writes_private_cache_path() {
+        let command = remote_upload_shell_command("portal-paste-20260703-120000-abc.png");
+
+        assert!(command.starts_with("/bin/sh -c "));
+        assert!(!command.starts_with("filename="));
+        assert!(!command.contains("\\''"));
+        assert!(command.contains("portal/pastes"));
+        assert!(command.contains("umask 077"));
+        assert!(command.contains("chmod 600"));
+        assert!(command.contains("cat > \"$path\""));
     }
 
     #[test]
