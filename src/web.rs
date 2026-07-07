@@ -284,6 +284,7 @@ struct WebTerminalUploadTarget {
     target_user: String,
     known_hosts_path: PathBuf,
     identity_file: Option<PathBuf>,
+    control_path: Option<PathBuf>,
 }
 
 struct WebTerminalUploadResult {
@@ -1283,23 +1284,30 @@ async fn upload_file_to_target(
         .take()
         .ok_or_else(|| anyhow!("failed to open target upload stdin"))?;
 
-    {
+    let stream_result = {
         use tokio::io::AsyncWriteExt;
-        stdin
-            .write_all(&contents)
-            .await
-            .context("failed to stream upload payload to target")?;
-        stdin
-            .shutdown()
-            .await
-            .context("failed to close target upload stdin")?;
+        timeout(WEB_TERMINAL_UPLOAD_TIMEOUT, async {
+            stdin
+                .write_all(&contents)
+                .await
+                .context("failed to stream upload payload to target")?;
+            stdin
+                .shutdown()
+                .await
+                .context("failed to close target upload stdin")?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .context("target upload timed out while streaming payload")?
+    };
+    if let Err(error) = stream_result {
+        drop(stdin);
+        let output = wait_for_target_upload(child).await?;
+        return Err(target_upload_stream_error(error, &output));
     }
     drop(stdin);
 
-    let output = timeout(WEB_TERMINAL_UPLOAD_TIMEOUT, child.wait_with_output())
-        .await
-        .context("target upload timed out")?
-        .context("failed to wait for target upload command")?;
+    let output = wait_for_target_upload(child).await?;
 
     if !output.status.success() {
         bail!(
@@ -1321,6 +1329,27 @@ async fn upload_file_to_target(
     }
 
     Ok(path.to_string())
+}
+
+async fn wait_for_target_upload(child: tokio::process::Child) -> Result<std::process::Output> {
+    timeout(WEB_TERMINAL_UPLOAD_TIMEOUT, child.wait_with_output())
+        .await
+        .context("target upload timed out")?
+        .context("failed to wait for target upload command")
+}
+
+fn target_upload_stream_error(
+    stream_error: anyhow::Error,
+    output: &std::process::Output,
+) -> anyhow::Error {
+    if output.status.success() {
+        return stream_error;
+    }
+
+    anyhow!(
+        "target upload failed before reading payload: {}",
+        command_output_message(&output.stderr)
+    )
 }
 
 fn target_upload_ssh_command(target: &WebTerminalUploadTarget, filename: &str) -> TokioCommand {
@@ -1354,6 +1383,13 @@ fn target_upload_ssh_command(target: &WebTerminalUploadTarget, filename: &str) -
 
     if let Some(identity_file) = &target.identity_file {
         command.arg("-i").arg(identity_file);
+    }
+    if let Some(control_path) = &target.control_path {
+        command
+            .arg("-o")
+            .arg("ControlMaster=auto")
+            .arg("-o")
+            .arg(format!("ControlPath={}", control_path.display()));
     }
 
     command
@@ -1746,14 +1782,16 @@ fn spawn_terminal_pty(state: &AppState, start: &WebTerminalStart) -> Result<Term
         .context("failed to open terminal pty")?;
 
     let identity_file = write_web_identity_file(state, start.private_key.as_deref())?;
+    let hub_state = super::State::new(state.state_dir.clone());
+    let control_path = hub_state.control_socket_path(start.session_id);
     let upload_target = WebTerminalUploadTarget {
         target_host: start.target_host.clone(),
         target_port: start.target_port,
         target_user: start.target_user.clone(),
         known_hosts_path: known_hosts_path(&state.state_dir),
         identity_file: identity_file.clone(),
+        control_path: Some(control_path.clone()),
     };
-    let hub_state = super::State::new(state.state_dir.clone());
     let attach_request = super::AttachRequest {
         session_id: start.session_id,
         target_host: start.target_host.clone(),
@@ -1766,6 +1804,7 @@ fn spawn_terminal_pty(state: &AppState, start: &WebTerminalStart) -> Result<Term
         allowed_targets: super::configured_allowed_targets(),
         identity_file: identity_file.clone(),
         batch_mode: false,
+        control_path: Some(control_path),
         replay_bytes: start.replay_bytes.unwrap_or(0),
     };
     let prepared = super::prepare_attach_session(&hub_state, attach_request).inspect_err(|_| {
@@ -1874,14 +1913,22 @@ fn queue_replay_output(
     };
 
     if truncated
-        && output_tx
-            .blocking_send(b"\r\n[Portal Hub replay truncated]\r\n".to_vec())
-            .is_err()
+        && !queue_replay_chunk(output_tx, b"\r\n[Portal Hub replay truncated]\r\n".to_vec())?
     {
         return Ok(());
     }
-    let _ = output_tx.blocking_send(replay);
+    let _ = queue_replay_chunk(output_tx, replay)?;
     Ok(())
+}
+
+fn queue_replay_chunk(output_tx: &mpsc::Sender<Vec<u8>>, output: Vec<u8>) -> Result<bool> {
+    match output_tx.try_send(output) {
+        Ok(()) => Ok(true),
+        Err(mpsc::error::TrySendError::Closed(_)) => Ok(false),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            Err(anyhow!("terminal replay output channel is full"))
+        }
+    }
 }
 
 fn spawn_prepared_attach_command(
@@ -2344,6 +2391,7 @@ fn ensure_session_dirs(state_dir: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(sessions_dir(state_dir))?;
     std::fs::create_dir_all(logs_dir(state_dir))?;
     std::fs::create_dir_all(sockets_dir(state_dir))?;
+    std::fs::create_dir_all(control_dir(state_dir))?;
     std::fs::create_dir_all(ssh_dir(state_dir))?;
     Ok(())
 }
@@ -2358,6 +2406,10 @@ fn logs_dir(state_dir: &std::path::Path) -> PathBuf {
 
 fn sockets_dir(state_dir: &std::path::Path) -> PathBuf {
     state_dir.join("sockets")
+}
+
+fn control_dir(state_dir: &std::path::Path) -> PathBuf {
+    state_dir.join("ctl")
 }
 
 fn ssh_dir(state_dir: &std::path::Path) -> PathBuf {
@@ -3926,6 +3978,52 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), b"remaining");
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminal_replay_queue_is_safe_inside_tokio_runtime() {
+        let state = test_state();
+        let session_id = Uuid::new_v4();
+        let log_path = state
+            .state_dir
+            .join("logs")
+            .join(format!("{session_id}.typescript"));
+        fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        fs::write(&log_path, b"previous output").unwrap();
+        let now = Utc::now();
+        let prepared = crate::PreparedAttach {
+            session_id,
+            target_host: "example.internal".to_string(),
+            target_port: 22,
+            target_user: "john".to_string(),
+            cols: 120,
+            rows: 30,
+            max_log_bytes: 1024,
+            logging_mode: crate::LoggingMode::Full,
+            socket_path: state.state_dir.join("sockets").join(session_id.to_string()),
+            log_path,
+            metadata: crate::SessionMetadata {
+                schema_version: crate::METADATA_SCHEMA_VERSION,
+                session_id,
+                session_name: format!("portal-{session_id}"),
+                target_host: "example.internal".to_string(),
+                target_port: 22,
+                target_user: "john".to_string(),
+                created_at: now,
+                updated_at: now,
+                ended_at: None,
+                process_group_id: None,
+                process_id: None,
+            },
+            should_replay: true,
+            replay_bytes: 1024,
+            argv: vec![std::ffi::OsString::from("dtach")],
+        };
+        let (tx, mut rx) = mpsc::channel(4);
+
+        queue_replay_output(&prepared, &tx).unwrap();
+
+        assert_eq!(rx.recv().await.unwrap(), b"previous output");
+    }
+
     #[test]
     fn password_hash_verifies_only_original_password() {
         let hash = hash_password("correct horse battery staple").unwrap();
@@ -4052,6 +4150,27 @@ mod tests {
         assert!(command.contains("umask 077"));
         assert!(command.contains("chmod 600"));
         assert!(command.contains("cat > \"$path\""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_upload_stream_error_prefers_ssh_stderr() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(255 << 8),
+            stdout: Vec::new(),
+            stderr: b"Permission denied (publickey,password).\n".to_vec(),
+        };
+        let error = target_upload_stream_error(
+            anyhow!("failed to stream upload payload to target"),
+            &output,
+        );
+
+        assert_eq!(
+            error.to_string(),
+            "target upload failed before reading payload: Permission denied (publickey,password)."
+        );
     }
 
     #[test]

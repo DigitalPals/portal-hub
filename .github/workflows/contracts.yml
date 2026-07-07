@@ -10,18 +10,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out Portal Hub
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: portal-hub
 
       - name: Check out Portal desktop
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: DigitalPals/portal
           path: portal
 
       - name: Check out Portal Android
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: DigitalPals/portal-android
           path: portal-android

@@ -11,7 +11,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.85.0
       - name: Build
         run: cargo build --release --locked
@@ -20,6 +20,6 @@ jobs:
           mkdir -p dist
           cp target/release/portal-hub dist/portal-hub-linux-x86_64
           tar -C dist -czf portal-hub-linux-x86_64.tar.gz portal-hub-linux-x86_64
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: portal-hub-linux-x86_64.tar.gz

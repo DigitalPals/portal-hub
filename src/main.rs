@@ -365,6 +365,7 @@ fn main() -> Result<()> {
                 allowed_targets,
                 identity_file,
                 batch_mode: !interactive_auth,
+                control_path: None,
                 replay_bytes,
             },
         ),
@@ -438,6 +439,7 @@ fn run_forced_command(state: &State) -> Result<()> {
                 allowed_targets: configured_allowed_targets(),
                 identity_file,
                 batch_mode: !interactive_auth,
+                control_path: None,
                 replay_bytes,
             },
         ),
@@ -637,6 +639,7 @@ struct AttachRequest {
     allowed_targets: Vec<String>,
     identity_file: Option<PathBuf>,
     batch_mode: bool,
+    control_path: Option<PathBuf>,
     replay_bytes: u64,
 }
 
@@ -741,6 +744,7 @@ fn prepare_attach_session(state: &State, request: AttachRequest) -> Result<Prepa
         &request.target_host,
         request.identity_file.as_deref(),
         request.batch_mode,
+        request.control_path.as_deref(),
     );
     let argv = attach_command_argv(
         &socket_path,
@@ -986,6 +990,7 @@ fn target_ssh_command(
     target_host: &str,
     identity_file: Option<&Path>,
     batch_mode: bool,
+    control_path: Option<&Path>,
 ) -> String {
     let mut args = vec![
         "ssh".to_string(),
@@ -1012,6 +1017,12 @@ fn target_ssh_command(
     if batch_mode {
         args.push("-o".to_string());
         args.push("BatchMode=yes".to_string());
+    }
+    if let Some(control_path) = control_path {
+        args.push("-o".to_string());
+        args.push("ControlMaster=auto".to_string());
+        args.push("-o".to_string());
+        args.push(format!("ControlPath={}", control_path.display()));
     }
     if let Some(identity_file) = identity_file {
         args.push("-i".to_string());
@@ -1566,6 +1577,7 @@ impl State {
         fs::create_dir_all(self.ssh_dir()).context("failed to create ssh state directory")?;
         fs::create_dir_all(self.logs_dir()).context("failed to create logs directory")?;
         fs::create_dir_all(self.sockets_dir()).context("failed to create sockets directory")?;
+        fs::create_dir_all(self.control_dir()).context("failed to create control directory")?;
         fs::create_dir_all(self.sync_dir()).context("failed to create sync directory")?;
         Ok(())
     }
@@ -1591,6 +1603,10 @@ impl State {
 
     fn sockets_dir(&self) -> PathBuf {
         self.root.join("sockets")
+    }
+
+    fn control_dir(&self) -> PathBuf {
+        self.root.join("ctl")
     }
 
     fn sync_dir(&self) -> PathBuf {
@@ -1619,6 +1635,10 @@ impl State {
 
     fn session_socket_path(&self, id: Uuid) -> PathBuf {
         self.sockets_dir().join(id.to_string())
+    }
+
+    fn control_socket_path(&self, id: Uuid) -> PathBuf {
+        self.control_dir().join(id.to_string())
     }
 
     fn load_session(&self, id: Uuid) -> Result<Option<SessionMetadata>> {
@@ -1840,6 +1860,7 @@ mod tests {
             "192.0.2.6",
             None,
             true,
+            None,
         );
 
         assert!(command.starts_with("stty rows 30 cols 100 2>/dev/null || true; exec ssh "));
@@ -1858,11 +1879,30 @@ mod tests {
             "example.com",
             Some(Path::new("/tmp/portal hub/key")),
             false,
+            None,
         );
 
         assert!(!command.contains("BatchMode=yes"));
         assert!(command.contains("IdentitiesOnly=yes"));
         assert!(command.contains("-i '/tmp/portal hub/key'"));
+    }
+
+    #[test]
+    fn target_ssh_command_supports_control_socket_reuse() {
+        let command = target_ssh_command(
+            24,
+            80,
+            Path::new("/tmp/known_hosts"),
+            22,
+            "deploy",
+            "example.com",
+            None,
+            false,
+            Some(Path::new("/tmp/portal hub/ctl/session")),
+        );
+
+        assert!(command.contains("ControlMaster=auto"));
+        assert!(command.contains("'ControlPath=/tmp/portal hub/ctl/session'"));
     }
 
     #[test]
