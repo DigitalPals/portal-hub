@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://digitalpals.dev/portal-hub/contracts/v2/session-update-request.schema.json",
+  "title": "Portal Hub API v2 session update request",
+  "type": "object",
+  "required": ["display_name"],
+  "properties": {
+    "display_name": {
+      "anyOf": [
+        { "type": "string", "minLength": 1, "maxLength": 80 },
+        { "type": "null" }
+      ]
+    }
+  },
+  "additionalProperties": false
+}

@@ -15,6 +15,7 @@
         "sync_v2": { "type": "boolean" },
         "sync_events": { "type": "boolean" },
         "web_proxy": { "type": "boolean" },
+        "session_titles": { "type": "boolean" },
         "key_vault": { "type": "boolean" },
         "vault_enrollment": { "type": "boolean" }
       },

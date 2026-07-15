@@ -31,7 +31,7 @@ const DEFAULT_MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
 const DEFAULT_PRUNE_ENDED_OLDER_THAN_DAYS: i64 = 14;
 const LIVE_LOG_COMPACT_INTERVAL: Duration = Duration::from_millis(500);
 const API_VERSION: u16 = 1;
-const METADATA_SCHEMA_VERSION: u16 = 1;
+const METADATA_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Debug, Parser)]
 #[command(name = "portal-hub")]
@@ -197,6 +197,8 @@ struct SessionMetadata {
     session_id: Uuid,
     #[serde(alias = "abduco_name")]
     session_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
     target_host: String,
     target_port: u16,
     target_user: String,
@@ -719,6 +721,7 @@ fn prepare_attach_session(state: &State, request: AttachRequest) -> Result<Prepa
             schema_version: METADATA_SCHEMA_VERSION,
             session_id: request.session_id,
             session_name,
+            display_name: None,
             target_host: request.target_host.clone(),
             target_port: request.target_port,
             target_user: request.target_user.clone(),
@@ -1785,6 +1788,7 @@ mod tests {
             schema_version: METADATA_SCHEMA_VERSION,
             session_id: id,
             session_name: format!("portal-{}", id),
+            display_name: None,
             target_host: "example.com".to_string(),
             target_port: 22,
             target_user: "john".to_string(),

@@ -12,6 +12,7 @@ Covered surfaces:
 
 - `GET /api/info`
 - `GET /api/sessions`
+- `PATCH /api/sessions/{id}`
 - `DELETE /api/sessions/{id}`
 - `GET /api/sessions/terminal` WebSocket start and server control messages
 - `GET /api/sync/v2`

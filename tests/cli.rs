@@ -14,7 +14,7 @@ fn version_json_reports_api_contract() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["api_version"], 1);
-    assert_eq!(json["metadata_schema_version"], 1);
+    assert_eq!(json["metadata_schema_version"], 2);
     assert!(json["version"].as_str().is_some());
 }
 

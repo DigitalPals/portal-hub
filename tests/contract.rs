@@ -8,6 +8,12 @@ fn schema(name: &str) -> Value {
         "session-delete-response" => {
             include_str!("../contracts/portal-hub/v2/session-delete-response.schema.json")
         }
+        "session-update-request" => {
+            include_str!("../contracts/portal-hub/v2/session-update-request.schema.json")
+        }
+        "session-update-response" => {
+            include_str!("../contracts/portal-hub/v2/session-update-response.schema.json")
+        }
         "sessions-response" => {
             include_str!("../contracts/portal-hub/v2/sessions-response.schema.json")
         }
@@ -73,6 +79,7 @@ fn api_info_response_contract_matches_hub_capabilities() {
                 "sync_v2": true,
                 "sync_events": true,
                 "web_proxy": true,
+                "session_titles": true,
                 "key_vault": true,
                 "vault_enrollment": true
             },
@@ -94,7 +101,7 @@ fn api_info_response_contract_matches_hub_capabilities() {
 }
 
 #[test]
-fn session_contracts_cover_list_and_delete_shapes() {
+fn session_contracts_cover_list_update_and_delete_shapes() {
     let session_id = "00000000-0000-0000-0000-000000000001";
     assert_valid(
         "sessions-response",
@@ -105,6 +112,7 @@ fn session_contracts_cover_list_and_delete_shapes() {
                 "schema_version": 1,
                 "session_id": session_id,
                 "session_name": "portal-00000000-0000-0000-0000-000000000001",
+                "display_name": "Production deploy",
                 "target_host": "example.internal",
                 "target_port": 22,
                 "target_user": "john",
@@ -116,6 +124,21 @@ fn session_contracts_cover_list_and_delete_shapes() {
                 "preview_base64": "cHJldmlldw==",
                 "preview_truncated": false
             }]
+        }),
+    );
+    assert_valid(
+        "session-update-request",
+        json!({ "display_name": "Production deploy" }),
+    );
+    assert_valid("session-update-request", json!({ "display_name": null }));
+    assert_invalid("session-update-request", json!({ "display_name": "" }));
+    assert_valid(
+        "session-update-response",
+        json!({
+            "api_version": 2,
+            "session_id": session_id,
+            "display_name": "Production deploy",
+            "updated_at": "2026-04-29T12:00:00Z"
         }),
     );
     assert_valid(

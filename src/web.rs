@@ -51,6 +51,7 @@ const ACCESS_TOKEN_TTL_HOURS: i64 = 24;
 const REFRESH_TOKEN_TTL_DAYS: i64 = 90;
 const AUTH_CODE_TTL_MINUTES: i64 = 5;
 const MIN_PASSWORD_LEN: usize = 12;
+const MAX_SESSION_DISPLAY_NAME_CHARS: usize = 80;
 const MAX_WEB_SESSION_PREVIEW_BYTES: u64 = 64 * 1024;
 const WEB_TERMINAL_OUTPUT_COALESCE_DELAY: Duration = Duration::from_millis(4);
 const WEB_TERMINAL_OUTPUT_FRAME_TARGET_BYTES: usize = 64 * 1024;
@@ -326,6 +327,8 @@ struct SessionMetadata {
     schema_version: u16,
     session_id: Uuid,
     session_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
     target_host: String,
     target_port: u16,
     target_user: String,
@@ -404,7 +407,10 @@ async fn run_async(
         .route("/api/info", get(api_info))
         .route("/api/me", get(api_me))
         .route("/api/sessions", get(api_sessions))
-        .route("/api/sessions/:id", delete(api_session_delete))
+        .route(
+            "/api/sessions/:id",
+            delete(api_session_delete).patch(api_session_update),
+        )
         .route("/api/sessions/terminal", get(api_session_terminal))
         .route("/api/sync", get(api_sync_get).put(api_sync_put))
         .route("/api/sync/v2", get(api_sync_v2_get).put(api_sync_v2_put))
@@ -931,6 +937,7 @@ async fn api_info(State(state): State<AppState>) -> Response {
             "sync_v2": true,
             "sync_events": true,
             "web_proxy": true,
+            "session_titles": true,
             "key_vault": true,
             "vault_enrollment": true,
             "vault_enrollment_events": true,
@@ -993,6 +1000,53 @@ async fn api_session_delete(
                 "session_id": session_id,
                 "deleted": true,
                 "process_signaled": killed,
+            }))
+            .into_response()
+        }
+        Err(error) if error.to_string().contains("not found") => {
+            json_error(StatusCode::NOT_FOUND, error)
+        }
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionUpdateRequest {
+    display_name: Value,
+}
+
+async fn api_session_update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(session_id): AxumPath<Uuid>,
+    Json(request): Json<SessionUpdateRequest>,
+) -> Response {
+    let (user_id, _) = match authenticated_user(&state, &headers) {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+
+    let display_name = match validate_session_display_name(request.display_name) {
+        Ok(display_name) => display_name,
+        Err(error) => return json_error(StatusCode::BAD_REQUEST, error),
+    };
+
+    match update_session_display_name(&state.state_dir, session_id, display_name) {
+        Ok(metadata) => {
+            audit(
+                &state,
+                "session_update",
+                &user_id,
+                json!({
+                    "session_id": session_id,
+                    "display_name": metadata.display_name,
+                }),
+            );
+            Json(json!({
+                "api_version": 2,
+                "session_id": session_id,
+                "display_name": metadata.display_name,
+                "updated_at": metadata.updated_at,
             }))
             .into_response()
         }
@@ -2382,6 +2436,42 @@ fn delete_session(state_dir: &std::path::Path, session_id: Uuid) -> Result<bool>
     save_session_metadata(state_dir, &metadata)?;
 
     Ok(process_signaled)
+}
+
+fn validate_session_display_name(display_name: Value) -> Result<Option<String>> {
+    let display_name = match display_name {
+        Value::Null => return Ok(None),
+        Value::String(display_name) => display_name,
+        _ => bail!("session display_name must be a string or null"),
+    };
+    let display_name = display_name.trim();
+    if display_name.is_empty() {
+        bail!("session display_name must not be empty");
+    }
+    if display_name.chars().count() > MAX_SESSION_DISPLAY_NAME_CHARS {
+        bail!(
+            "session display_name must be at most {} characters",
+            MAX_SESSION_DISPLAY_NAME_CHARS
+        );
+    }
+    if display_name.chars().any(char::is_control) {
+        bail!("session display_name must not contain control characters");
+    }
+    Ok(Some(display_name.to_string()))
+}
+
+fn update_session_display_name(
+    state_dir: &std::path::Path,
+    session_id: Uuid,
+    display_name: Option<String>,
+) -> Result<SessionMetadata> {
+    let mut metadata = load_session_metadata(state_dir, session_id)?
+        .with_context(|| format!("session {} not found", session_id))?;
+    metadata.schema_version = crate::METADATA_SCHEMA_VERSION;
+    metadata.display_name = display_name;
+    metadata.updated_at = Utc::now();
+    save_session_metadata(state_dir, &metadata)?;
+    Ok(metadata)
 }
 
 fn load_session_metadata(
@@ -4130,6 +4220,7 @@ mod tests {
                 schema_version: crate::METADATA_SCHEMA_VERSION,
                 session_id,
                 session_name: format!("portal-{session_id}"),
+                display_name: None,
                 target_host: "example.internal".to_string(),
                 target_port: 22,
                 target_user: "john".to_string(),
@@ -4576,6 +4667,7 @@ mod tests {
             schema_version: 1,
             session_id,
             session_name: format!("portal-{}", session_id),
+            display_name: None,
             target_host: "example.internal".to_string(),
             target_port: 22,
             target_user: "john".to_string(),
@@ -4599,6 +4691,54 @@ mod tests {
         assert!(metadata.process_group_id.is_none());
         assert!(metadata.process_id.is_none());
         assert!(!sessions_socket_path(&state_dir, session_id).exists());
+    }
+
+    #[test]
+    fn session_display_name_validation_and_persistence_are_strict() {
+        let state_dir = std::env::temp_dir().join(format!("portal-hub-test-{}", Uuid::new_v4()));
+        ensure_session_dirs(&state_dir).unwrap();
+        let session_id = Uuid::new_v4();
+        let now = Utc::now();
+        save_session_metadata(
+            &state_dir,
+            &SessionMetadata {
+                schema_version: 1,
+                session_id,
+                session_name: format!("portal-{session_id}"),
+                display_name: None,
+                target_host: "example.internal".to_string(),
+                target_port: 22,
+                target_user: "john".to_string(),
+                created_at: now,
+                updated_at: now,
+                ended_at: None,
+                process_group_id: None,
+                process_id: None,
+            },
+        )
+        .unwrap();
+
+        let name = validate_session_display_name(json!("  Production deploy  ")).unwrap();
+        let metadata = update_session_display_name(&state_dir, session_id, name).unwrap();
+        assert_eq!(metadata.schema_version, crate::METADATA_SCHEMA_VERSION);
+        assert_eq!(metadata.display_name.as_deref(), Some("Production deploy"));
+        assert!(metadata.updated_at >= now);
+
+        let reloaded = load_session_metadata(&state_dir, session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.display_name.as_deref(), Some("Production deploy"));
+        assert!(
+            validate_session_display_name(Value::Null)
+                .unwrap()
+                .is_none()
+        );
+        assert!(validate_session_display_name(json!("")).is_err());
+        assert!(validate_session_display_name(json!("line\nbreak")).is_err());
+        assert!(validate_session_display_name(json!(42)).is_err());
+        assert!(validate_session_display_name(json!("x".repeat(81))).is_err());
+
+        let _ = std::fs::remove_dir_all(&state_dir);
     }
 
     #[test]
