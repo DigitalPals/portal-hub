@@ -209,12 +209,21 @@ fn terminal_websocket_contracts_cover_client_and_server_messages() {
             "cols": 120,
             "rows": 30,
             "replay_bytes": 0,
+            "detect_os": true,
             "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n"
         }),
     );
     assert_valid(
         "terminal-control-message",
         json!({ "type": "started", "session_id": session_id }),
+    );
+    assert_valid(
+        "terminal-control-message",
+        json!({
+            "type": "os_detected",
+            "uname": "Linux",
+            "os_release": "ID=ubuntu\nID_LIKE=debian\n"
+        }),
     );
     assert_valid("terminal-control-message", json!({ "type": "closed" }));
     assert_valid(

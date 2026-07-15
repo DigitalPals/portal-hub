@@ -31,6 +31,16 @@
     },
     {
       "type": "object",
+      "required": ["type", "uname"],
+      "properties": {
+        "type": { "const": "os_detected" },
+        "uname": { "type": "string", "minLength": 1 },
+        "os_release": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
       "required": ["type", "cols", "rows"],
       "properties": {
         "type": { "const": "resize" },

@@ -35,7 +35,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::broadcast;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tokio_stream::once;
 use tokio_stream::wrappers::BroadcastStream;
@@ -56,6 +56,8 @@ const WEB_TERMINAL_OUTPUT_COALESCE_DELAY: Duration = Duration::from_millis(4);
 const WEB_TERMINAL_OUTPUT_FRAME_TARGET_BYTES: usize = 64 * 1024;
 const WEB_TERMINAL_UPLOAD_MAX_BYTES: usize = 64 * 1024 * 1024;
 const WEB_TERMINAL_UPLOAD_TIMEOUT: Duration = Duration::from_secs(45);
+const WEB_TERMINAL_OS_DETECTION_TIMEOUT: Duration = Duration::from_secs(10);
+const OS_RELEASE_MARKER: &str = "__PORTAL_OS_RELEASE__\n";
 const HOST_KEY_SCAN_TIMEOUT_SECS: &str = "5";
 const HOST_KEY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -246,6 +248,8 @@ struct WebTerminalStart {
     replay_bytes: Option<u64>,
     #[serde(default)]
     private_key: Option<String>,
+    #[serde(default)]
+    detect_os: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -290,6 +294,12 @@ struct WebTerminalUploadTarget {
 struct WebTerminalUploadResult {
     request_id: Uuid,
     result: Result<String, String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TargetOsDetection {
+    uname: String,
+    os_release: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1103,6 +1113,14 @@ async fn handle_terminal_socket(state: AppState, socket: WebSocket) {
         .await;
 
     let (upload_result_tx, mut upload_result_rx) = mpsc::channel::<WebTerminalUploadResult>(8);
+    let (os_detection_tx, mut os_detection_rx) = oneshot::channel();
+    let mut os_detection_pending = start.detect_os;
+    if start.detect_os {
+        let target = terminal.upload_target.clone();
+        tokio::spawn(async move {
+            let _ = os_detection_tx.send(detect_target_os(&target).await);
+        });
+    }
 
     loop {
         tokio::select! {
@@ -1150,6 +1168,33 @@ async fn handle_terminal_socket(state: AppState, socket: WebSocket) {
                     .is_err()
                 {
                     break;
+                }
+            }
+            os_detection = &mut os_detection_rx, if os_detection_pending => {
+                os_detection_pending = false;
+                match os_detection {
+                    Ok(Ok(detection)) => {
+                        let mut payload = json!({
+                            "type": "os_detected",
+                            "uname": detection.uname,
+                        });
+                        if let Some(os_release) = detection.os_release {
+                            payload["os_release"] = Value::String(os_release);
+                        }
+                        if ws_tx
+                            .send(WsMessage::Text(payload.to_string()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        eprintln!("Portal Hub target OS detection failed: {error:#}");
+                    }
+                    Err(_) => {
+                        eprintln!("Portal Hub target OS detection task ended unexpectedly");
+                    }
                 }
             }
             message = ws_rx.next() => {
@@ -1396,6 +1441,87 @@ fn target_upload_ssh_command(target: &WebTerminalUploadTarget, filename: &str) -
         .arg(&target.target_host)
         .arg(remote_upload_shell_command(filename));
     command
+}
+
+async fn detect_target_os(target: &WebTerminalUploadTarget) -> Result<TargetOsDetection> {
+    timeout(WEB_TERMINAL_OS_DETECTION_TIMEOUT, async {
+        let control_path = target
+            .control_path
+            .as_ref()
+            .ok_or_else(|| anyhow!("target SSH control socket is unavailable"))?;
+        while !control_path.exists() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // Let the user-facing SSH process request its PTY and shell before an
+        // exec channel is opened. Some PAM setups otherwise consume login/MOTD
+        // output on the metadata channel instead of the visible terminal.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        let output = target_os_detection_ssh_command(target)
+            .output()
+            .await
+            .context("failed to run target OS detection command")?;
+        if !output.status.success() {
+            bail!(
+                "target OS detection command failed: {}",
+                command_output_message(&output.stderr)
+            );
+        }
+        parse_target_os_output(&output.stdout)
+    })
+    .await
+    .context("target OS detection timed out")?
+}
+
+fn target_os_detection_ssh_command(target: &WebTerminalUploadTarget) -> TokioCommand {
+    let mut command = TokioCommand::new("ssh");
+    command
+        .arg("-F")
+        .arg("/dev/null")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ControlMaster=no")
+        .arg("-o")
+        .arg(format!(
+            "UserKnownHostsFile={}",
+            target.known_hosts_path.display()
+        ))
+        .arg("-p")
+        .arg(target.target_port.to_string())
+        .arg("-l")
+        .arg(&target.target_user);
+
+    if let Some(control_path) = &target.control_path {
+        command
+            .arg("-o")
+            .arg(format!("ControlPath={}", control_path.display()));
+    }
+
+    command.arg(&target.target_host).arg(concat!(
+        "uname -s 2>/dev/null; ",
+        "printf '__PORTAL_OS_RELEASE__\\n'; ",
+        "if [ -r /etc/os-release ]; then cat /etc/os-release; fi"
+    ));
+    command
+}
+
+fn parse_target_os_output(output: &[u8]) -> Result<TargetOsDetection> {
+    let output =
+        std::str::from_utf8(output).context("target OS detection returned non-UTF-8 output")?;
+    let (uname, os_release) = output
+        .split_once(OS_RELEASE_MARKER)
+        .ok_or_else(|| anyhow!("target OS detection output is missing its marker"))?;
+    let uname = uname.trim();
+    if uname.is_empty() {
+        bail!("target OS detection returned an empty uname");
+    }
+    let os_release = os_release.trim();
+
+    Ok(TargetOsDetection {
+        uname: uname.to_string(),
+        os_release: (!os_release.is_empty()).then(|| os_release.to_string()),
+    })
 }
 
 fn remote_upload_shell_command(filename: &str) -> String {
@@ -4150,6 +4276,40 @@ mod tests {
         assert!(command.contains("umask 077"));
         assert!(command.contains("chmod 600"));
         assert!(command.contains("cat > \"$path\""));
+    }
+
+    #[test]
+    fn target_os_detection_parses_linux_distribution_data() {
+        let detection =
+            parse_target_os_output(b"Linux\n__PORTAL_OS_RELEASE__\nID=ubuntu\nID_LIKE=debian\n")
+                .unwrap();
+
+        assert_eq!(
+            detection,
+            TargetOsDetection {
+                uname: "Linux".to_string(),
+                os_release: Some("ID=ubuntu\nID_LIKE=debian".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn target_os_detection_accepts_non_linux_without_os_release() {
+        let detection = parse_target_os_output(b"FreeBSD\n__PORTAL_OS_RELEASE__\n").unwrap();
+
+        assert_eq!(
+            detection,
+            TargetOsDetection {
+                uname: "FreeBSD".to_string(),
+                os_release: None,
+            }
+        );
+    }
+
+    #[test]
+    fn target_os_detection_rejects_malformed_output() {
+        assert!(parse_target_os_output(b"Linux\nID=ubuntu\n").is_err());
+        assert!(parse_target_os_output(b"__PORTAL_OS_RELEASE__\nID=ubuntu\n").is_err());
     }
 
     #[cfg(unix)]
